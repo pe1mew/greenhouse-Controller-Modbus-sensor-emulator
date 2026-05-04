@@ -56,11 +56,18 @@ greenhouse-Controller-Modbus-sensor-emulator/
 │
 ├── firmware/                   ← PlatformIO / ESP-IDF project
 │   ├── platformio.ini
-│   ├── src/                    ← Application source code
-│   └── test/                   ← Unit tests
+│   ├── data/                   ← SPIFFS web assets (index.html, style.css, app.js)
+│   ├── sensorEmulator/         ← Application source code
+│   └── implementationPlan.md
+│
+├── webMoc/                     ← Desktop web mock (Python / Flask)
+│   ├── server.py               ← Emulates the Atom Lite HTTP + WebSocket interface
+│   ├── requirements.txt
+│   └── README.md
 │
 ├── design/
-│   └── modbusSensorEmulator.md ← Full design plan
+│   ├── modbusSensorEmulator.md ← Full design plan
+│   └── webMoc.md               ← Web mock implementation plan
 │
 ├── documentation/              ← Driver source and datasheet references
 │   ├── code_FG6485A_driver/    ← FG6485A Modbus RTU driver (reference)
@@ -83,6 +90,21 @@ greenhouse-Controller-Modbus-sensor-emulator/
 
 - [Visual Studio Code](https://code.visualstudio.com/) with the [PlatformIO IDE extension](https://platformio.org/install/ide?install=vscode)
 - Git
+
+### Web Mock (no hardware required)
+
+A desktop mock server lets you develop and review the web UI without any hardware.
+It serves the same `firmware/data/` assets and replicates all HTTP + WebSocket
+endpoints with simulated sensor state.
+
+```
+cd webMoc
+pip install -r requirements.txt
+python server.py
+# Open http://127.0.0.1:5000
+```
+
+See [webMoc/README.md](webMoc/README.md) for full details.
 
 ### Build and Flash
 

@@ -6,6 +6,43 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ---
 
+## [0.7.1] — 2026-05-04  Web Mock & GUI review fixes
+
+### Added — web mock (`webMoc/`)
+- `webMoc/server.py` — Flask + flask-sock desktop mock of the Atom Lite HTTP/WebSocket
+  interface. Serves `firmware/data/` assets directly. Replicates all Phase 7 endpoints:
+  1 Hz WebSocket status push, sensor config with clamping, simulated WiFi connect
+  (3 s timer), simulated NTP sync (2 s timer), manual time offset, log clear.
+  Synthetic Modbus log frames pushed every 5 s to exercise the log table.
+- `webMoc/requirements.txt` — `flask>=3.0`, `flask-sock>=0.7`.
+- `webMoc/README.md` — prerequisites, setup, endpoint reference, mock vs firmware
+  differences table.
+
+### Changed — web assets (`firmware/data/`) — GUI review fixes
+- `data/index.html`:
+  - FG6485A humidity slider and input: `step` `0.1` → `1`, `max` `99.9` → `99`
+    (integer %RH matches operator-facing unit).
+  - S200 wind speed slider and input: `step` `0.001` → `1` (whole m/s).
+  - S200 wind direction slider and input: `step` `0.001` → `1` (whole degrees).
+  - S200 heating temp slider and input: `step` `0.001` → `0.1` (one decimal,
+    matching FG6485A temperature).
+  - Section heading "WiFi Settings" → "System Settings"; WiFi demoted to grey
+    `<h3>` sub-heading alongside NTP and Manual time.
+- `data/app.js`:
+  - Humidity status display `toFixed(1)` → `toFixed(0)`.
+  - Wind speed and direction status display `toFixed(3)` → `toFixed(0)`.
+  - Humidity and wind speed/direction POST parse functions `parseFloat` → `parseInt`.
+  - Added `initResizableCols()` — injects a drag handle on the Frame and Summary
+    log columns; `table-layout: fixed`; 40 px minimum column width.
+  - `initResizableCols()` called at boot.
+- `data/style.css`:
+  - `.col-resizer` handle styles added (5 px wide, highlights on hover and drag).
+  - `#log-tbl th` gains `overflow: hidden; white-space: nowrap`.
+  - `#log-tbl th/td:nth-child(1)` pinned to 72 px (Time column).
+  - `#log-tbl th/td:nth-child(2)` pinned to 42 px (Dir column).
+
+---
+
 ## [0.7.0] — 2026-05-04  Phase 7 — Web Interface: Server + WebSocket
 
 ### Added — firmware (`firmware/sensorEmulator/`)
