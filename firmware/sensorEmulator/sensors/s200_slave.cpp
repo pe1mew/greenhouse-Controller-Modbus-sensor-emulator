@@ -20,6 +20,22 @@
 // Build a standard FC03/FC04 read response.
 // ---------------------------------------------------------------------------
 
+/**
+ * @brief Serialise a register-read response frame into @p resp.
+ *
+ * Produces a complete Modbus RTU frame:
+ * @code
+ *   [addr][fc][byte_count][word0_hi][word0_lo]...[crc_lo][crc_hi]
+ * @endcode
+ * The CRC covers all bytes up to (but not including) the two CRC bytes.
+ *
+ * @param addr      Slave address echoed in the response.
+ * @param fc        Function code echoed in the response (0x03 or 0x04).
+ * @param words     Array of register values in big-endian word order.
+ * @param qty       Number of 16-bit words in @p words.
+ * @param resp      Output buffer (must be at least 3 + qty*2 + 2 bytes).
+ * @param resp_len  Set to the total number of bytes written to @p resp.
+ */
 static void build_read_response(uint8_t addr, uint8_t fc,
                                  const uint16_t *words, uint8_t qty,
                                  uint8_t *resp, uint8_t *resp_len)
@@ -40,17 +56,32 @@ static void build_read_response(uint8_t addr, uint8_t fc,
 }
 
 // ---------------------------------------------------------------------------
-// Map a single FC04 register address to the corresponding uint16 word.
-// The int32 fields in sensor_state are split into (high-word, low-word) pairs.
-// Returns false if the address is not FC04-readable.
+// Map a single FC04 register address (measurement space)
 // ---------------------------------------------------------------------------
 
+/**
+ * @brief Map a single FC04 register address to its word value in g_sensor_state.
+ *
+ * Must be called with g_sensor_state.mutex already held.  Covers the wind
+ * direction (0x0008–0x000D), wind speed (0x000E–0x0013), and heating temperature
+ * (0x001C–0x001F) input-register ranges defined in the S200 register map.
+ *
+ * int32 values are stored in g_sensor_state as raw ×1000 integers.  Each is
+ * split across two consecutive registers: @c reg N = high 16 bits,
+ * @c reg N+1 = low 16 bits (big-endian word order).
+ *
+ * @param reg  Modbus input-register address.
+ * @param out  Set to the 16-bit word on success; unchanged on failure.
+ * @return @c true if the register is FC04-readable, @c false otherwise.
+ */
 static bool read_fc04_register(uint16_t reg, uint16_t *out)
 {
     // Helper macros to extract big-endian word halves from an int32.
     // Casting to uint32_t before shifting avoids sign-extension artefacts.
+    /** @cond INTERNAL */
 #define HI(v) ((uint16_t)(((uint32_t)(v)) >> 16))
 #define LO(v) ((uint16_t)((uint32_t)(v) & 0xFFFFu))
+    /** @endcond */
 
     switch (reg) {
         // Wind direction
@@ -80,10 +111,19 @@ static bool read_fc04_register(uint16_t reg, uint16_t *out)
 }
 
 // ---------------------------------------------------------------------------
-// Map a single FC03 register address (config space).
-// Returns false if the address is not FC03-readable.
+// Map a single FC03 register address (config space)
 // ---------------------------------------------------------------------------
 
+/**
+ * @brief Map a single FC03 register address to its value in g_sensor_state.
+ *
+ * Must be called with g_sensor_state.mutex already held.  Covers only the
+ * two config registers: 0x1000 (slave address) and 0x1001 (baud rate code).
+ *
+ * @param reg  Modbus holding-register address.
+ * @param out  Set to the 16-bit value on success; unchanged on failure.
+ * @return @c true if the register is FC03-readable, @c false otherwise.
+ */
 static bool read_fc03_register(uint16_t reg, uint16_t *out)
 {
     switch (reg) {
@@ -94,9 +134,22 @@ static bool read_fc03_register(uint16_t reg, uint16_t *out)
 }
 
 // ---------------------------------------------------------------------------
-// FC04 handler — input register reads (measurement data)
+// FC04 handler
 // ---------------------------------------------------------------------------
 
+/**
+ * @brief Modbus FC04 (Read Input Registers) handler for the S200 slave.
+ *
+ * Validates quantity (1–125) and that every requested register address is
+ * FC04-readable (measurement space), then snapshots the values under
+ * g_sensor_state.mutex and builds the response.  Returns exception 0x02
+ * (Illegal Data Address) or 0x03 (Illegal Data Value) on bad inputs.
+ *
+ * @param req      Full received Modbus RTU frame.
+ * @param req_len  Length of @p req in bytes (unused internally).
+ * @param resp     Output buffer for the response frame.
+ * @param resp_len Set to the number of bytes written to @p resp.
+ */
 static void s200_fc04(const uint8_t *req, uint8_t req_len,
                        uint8_t *resp, uint8_t *resp_len)
 {
@@ -135,9 +188,22 @@ static void s200_fc04(const uint8_t *req, uint8_t req_len,
 }
 
 // ---------------------------------------------------------------------------
-// FC03 handler — holding register reads (config)
+// FC03 handler
 // ---------------------------------------------------------------------------
 
+/**
+ * @brief Modbus FC03 (Read Holding Registers) handler for the S200 slave.
+ *
+ * Validates quantity and that every requested register address is FC03-readable
+ * (config space: 0x1000–0x1001), then snapshots values under
+ * g_sensor_state.mutex and builds the response.  Returns exception 0x02
+ * or 0x03 on bad inputs.
+ *
+ * @param req      Full received Modbus RTU frame.
+ * @param req_len  Length of @p req in bytes (unused internally).
+ * @param resp     Output buffer for the response frame.
+ * @param resp_len Set to the number of bytes written to @p resp.
+ */
 static void s200_fc03(const uint8_t *req, uint8_t req_len,
                        uint8_t *resp, uint8_t *resp_len)
 {

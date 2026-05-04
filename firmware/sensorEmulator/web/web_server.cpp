@@ -40,40 +40,61 @@
 // Configuration
 // ---------------------------------------------------------------------------
 
+/** @brief WebSocket push interval in milliseconds. */
 static constexpr size_t  WS_PUSH_INTERVAL_MS = 1000;
+/** @brief Stack size in bytes for the WS push task. */
 static constexpr size_t  WS_PUSH_STACK        = 4096;
+/** @brief Maximum HTTP request body size in bytes. */
 static constexpr size_t  HTTP_BODY_MAX         = 512;
+/** @brief Maximum size of a status JSON frame in bytes. */
 static constexpr size_t  STATUS_JSON_MAX       = 768;
+/** @brief Maximum number of simultaneous WebSocket clients. */
 static constexpr size_t  MAX_WS_CLIENTS        = 8;
 
 // ---------------------------------------------------------------------------
 // Module state
 // ---------------------------------------------------------------------------
 
+/** @cond INTERNAL */
 static httpd_handle_t s_server    = nullptr;
 static uint8_t        s_fg_addr   = 1;
 static uint8_t        s_s200_addr = 44;
+/** @endcond */
 
 // ---------------------------------------------------------------------------
 // Clamping helpers
 // ---------------------------------------------------------------------------
 
+/** @brief Clamp integer @p v to the closed range [@p lo, @p hi]. */
 static inline int clamp_int(int v, int lo, int hi)
     { return v < lo ? lo : v > hi ? hi : v; }
 
+/** @brief Clamp @p v to the int16_t range [@p lo, @p hi]. */
 static inline int16_t clamp_i16(int v, int16_t lo, int16_t hi)
     { return (int16_t)clamp_int(v, (int)lo, (int)hi); }
 
+/** @brief Clamp @p v to the uint16_t range [@p lo, @p hi]. */
 static inline uint16_t clamp_u16(int v, uint16_t lo, uint16_t hi)
     { return (uint16_t)clamp_int(v, (int)lo, (int)hi); }
 
+/** @brief Clamp @p v to the int32_t range [@p lo, @p hi]. */
 static inline int32_t clamp_i32(int64_t v, int32_t lo, int32_t hi)
     { return (int32_t)(v < lo ? lo : v > hi ? hi : v); }
 
 // ---------------------------------------------------------------------------
-// HTTP body reader — accumulates the full POST body into buf.
+// HTTP body reader
 // ---------------------------------------------------------------------------
 
+/**
+ * @brief Accumulate the full HTTP POST body into @p buf.
+ *
+ * Reads up to @p buf_size − 1 bytes and null-terminates the result.
+ *
+ * @param req       Incoming HTTP request.
+ * @param buf       Destination buffer.
+ * @param buf_size  Size of @p buf in bytes.
+ * @return ESP_OK on success, ESP_FAIL if a receive chunk returns an error.
+ */
 static esp_err_t read_body(httpd_req_t *req, char *buf, size_t buf_size)
 {
     if (req->content_len == 0) { buf[0] = '\0'; return ESP_OK; }
@@ -93,6 +114,16 @@ static esp_err_t read_body(httpd_req_t *req, char *buf, size_t buf_size)
 // SPIFFS file server
 // ---------------------------------------------------------------------------
 
+/**
+ * @brief Serve a file from SPIFFS as a chunked HTTP response.
+ *
+ * Sends a 404 if the file does not exist or a 500 if it cannot be opened.
+ *
+ * @param req           Incoming HTTP request.
+ * @param path          Absolute SPIFFS path (e.g. "/index.html").
+ * @param content_type  MIME type string applied to the response.
+ * @return ESP_OK in all cases; HTTP error codes are sent to the client.
+ */
 static esp_err_t serve_spiffs(httpd_req_t *req,
                                const char  *path,
                                const char  *content_type)
@@ -123,17 +154,21 @@ static esp_err_t serve_spiffs(httpd_req_t *req,
 // Static file GET handlers
 // ---------------------------------------------------------------------------
 
+/** @brief Redirect GET "/" → serve /index.html. @param req HTTP request. */
 static esp_err_t handle_root(httpd_req_t *req)
 {
     return serve_spiffs(req, "/index.html", "text/html");
 }
 
+/** @brief Serve GET /index.html from SPIFFS. @param req HTTP request. */
 static esp_err_t handle_html(httpd_req_t *req)
     { return serve_spiffs(req, "/index.html", "text/html"); }
 
+/** @brief Serve GET /style.css from SPIFFS. @param req HTTP request. */
 static esp_err_t handle_css(httpd_req_t *req)
     { return serve_spiffs(req, "/style.css",  "text/css"); }
 
+/** @brief Serve GET /app.js from SPIFFS. @param req HTTP request. */
 static esp_err_t handle_js(httpd_req_t *req)
     { return serve_spiffs(req, "/app.js", "application/javascript"); }
 
@@ -141,12 +176,23 @@ static esp_err_t handle_js(httpd_req_t *req)
 // WebSocket broadcast via httpd_queue_work
 // ---------------------------------------------------------------------------
 
+/**
+ * @brief Payload buffer passed from ws_push_task to broadcast_cb via httpd_queue_work.
+ */
 struct broadcast_ctx_t {
-    uint8_t payload[STATUS_JSON_MAX];
-    size_t  len;
+    uint8_t payload[STATUS_JSON_MAX]; /**< @brief JSON frame bytes to broadcast. */
+    size_t  len;                      /**< @brief Number of valid bytes in @c payload. */
 };
 
-// Runs on the httpd task (called via httpd_queue_work).
+/**
+ * @brief Send the JSON frame in @p arg to every active WebSocket client.
+ *
+ * Invoked on the httpd task via httpd_queue_work().  Iterates all open file
+ * descriptors, filters for WebSocket connections, and calls
+ * httpd_ws_send_frame_async() for each.  Frees @p arg when done.
+ *
+ * @param arg  Heap-allocated @ref broadcast_ctx_t containing the JSON payload.
+ */
 static void broadcast_cb(void *arg)
 {
     auto *ctx = static_cast<broadcast_ctx_t *>(arg);
@@ -172,6 +218,15 @@ static void broadcast_cb(void *arg)
     free(ctx);
 }
 
+/**
+ * @brief Allocate a broadcast_ctx_t, copy @p json into it, and schedule
+ *        broadcast_cb via httpd_queue_work().
+ *
+ * Safe to call from any FreeRTOS task.  The ctx is freed by broadcast_cb.
+ *
+ * @param json  Null-terminated JSON string to broadcast.
+ * @param len   Length of @p json (excluding the null terminator).
+ */
 static void ws_broadcast(const char *json, size_t len)
 {
     if (!s_server || len == 0) return;
@@ -188,14 +243,27 @@ static void ws_broadcast(const char *json, size_t len)
 // Status JSON builder
 // ---------------------------------------------------------------------------
 
+/**
+ * @brief Snapshot g_sensor_state and WiFi info, then serialise to a JSON string.
+ *
+ * The produced object has the shape documented in web_server.h under
+ * "WebSocket push payload".  The sensor values are converted to engineering
+ * units (raw ÷10 for FG6485A, raw ÷1000 for S200).
+ *
+ * @param buf       Destination buffer for the null-terminated JSON string.
+ * @param buf_size  Size of @p buf in bytes.
+ */
 static void build_status_json(char *buf, size_t buf_size)
 {
     // Snapshot sensor state under mutex.
     xSemaphoreTake(g_sensor_state.mutex, portMAX_DELAY);
-    int16_t  fg_temp  = g_sensor_state.fg_temperature;
-    uint16_t fg_hum   = g_sensor_state.fg_humidity;
-    int32_t  spd_avg  = g_sensor_state.s200_spd_avg;
-    int32_t  dir_avg  = g_sensor_state.s200_dir_avg;
+    int16_t       fg_temp   = g_sensor_state.fg_temperature;
+    uint16_t      fg_hum    = g_sensor_state.fg_humidity;
+    sensor_mode_t fg_mode   = g_sensor_state.fg_mode;
+    int32_t       spd_avg   = g_sensor_state.s200_spd_avg;
+    int32_t       dir_avg   = g_sensor_state.s200_dir_avg;
+    int32_t       s200_heat = g_sensor_state.s200_heat_high;
+    sensor_mode_t s200_mode = g_sensor_state.s200_mode;
     xSemaphoreGive(g_sensor_state.mutex);
 
     // WiFi info.
@@ -229,11 +297,16 @@ static void build_status_json(char *buf, size_t buf_size)
     cJSON *fg = cJSON_CreateObject();
     cJSON_AddNumberToObject(fg, "temp", fg_temp / 10.0);
     cJSON_AddNumberToObject(fg, "hum",  fg_hum  / 10.0);
+    cJSON_AddNumberToObject(fg, "mode", (int)fg_mode);
+    cJSON_AddNumberToObject(fg, "addr", s_fg_addr);
     cJSON_AddItemToObject(root, "fg", fg);
 
     cJSON *s2 = cJSON_CreateObject();
-    cJSON_AddNumberToObject(s2, "spd", spd_avg / 1000.0);
-    cJSON_AddNumberToObject(s2, "dir", dir_avg / 1000.0);
+    cJSON_AddNumberToObject(s2, "spd",  spd_avg   / 1000.0);
+    cJSON_AddNumberToObject(s2, "dir",  dir_avg   / 1000.0);
+    cJSON_AddNumberToObject(s2, "heat", s200_heat / 1000.0);
+    cJSON_AddNumberToObject(s2, "mode", (int)s200_mode);
+    cJSON_AddNumberToObject(s2, "addr", s_s200_addr);
     cJSON_AddItemToObject(root, "s200", s2);
 
     cJSON *wf = cJSON_CreateObject();
@@ -261,6 +334,15 @@ static void build_status_json(char *buf, size_t buf_size)
 // WebSocket endpoint handler
 // ---------------------------------------------------------------------------
 
+/**
+ * @brief Handle GET /ws — accept the WebSocket upgrade, then discard incoming frames.
+ *
+ * The server is push-only in Phase 7: ws_push_task owns all outgoing frames.
+ * Incoming text frames are received and silently discarded.
+ *
+ * @param req  Incoming HTTP/WebSocket request.
+ * @return ESP_OK.
+ */
 static esp_err_t handle_ws(httpd_req_t *req)
 {
     if (req->method == HTTP_GET) {
@@ -280,12 +362,29 @@ static esp_err_t handle_ws(httpd_req_t *req)
 
 // ---------------------------------------------------------------------------
 // POST /config/sensor
-// Body: { "sensor":"fg6485a"|"s200", ["addr":int], ["mode":0|1|2],
-//         ["temp":float °C], ["hum":float %RH],     ← FG6485A
-//         ["spd":float m/s], ["dir":float °], ["heat":float °C] }  ← S200
-// Response: same keys with clamped physical values + "clamped":bool
 // ---------------------------------------------------------------------------
 
+/**
+ * @brief Handle POST /config/sensor — update slave address, mode, and/or
+ *        manual sensor values for the FG6485A or S200.
+ *
+ * JSON body keys (all optional except @c sensor):
+ * @code
+ * { "sensor":"fg6485a"|"s200",
+ *   "addr":int,                         // Modbus slave address 1–247
+ *   "mode":0|1|2,                       // SENSOR_MODE_AUTO/MANUAL/REPLAY
+ *   "temp":float,   "hum":float,        // FG6485A: °C, %RH
+ *   "spd":float,    "dir":float,        // S200: m/s, degrees
+ *   "heat":float }                      // S200: °C
+ * @endcode
+ *
+ * Values are clamped to the physical sensor range (design §11.1).
+ * The response echoes accepted keys with their clamped values and sets
+ * @c "clamped":true if any value was adjusted.
+ *
+ * @param req  Incoming HTTP POST request.
+ * @return ESP_OK; HTTP 400 is sent to the client on parse error.
+ */
 static esp_err_t handle_post_sensor(httpd_req_t *req)
 {
     char body[HTTP_BODY_MAX];
@@ -434,9 +533,19 @@ static esp_err_t handle_post_sensor(httpd_req_t *req)
 
 // ---------------------------------------------------------------------------
 // POST /config/wifi
-// Body: { "ssid":"<network>", "pass":"<password>" }
 // ---------------------------------------------------------------------------
 
+/**
+ * @brief Handle POST /config/wifi — trigger a Wi-Fi STA connection attempt.
+ *
+ * JSON body: @code { "ssid":"<network>", "pass":"<password>" } @endcode
+ *
+ * Delegates to wifi_manager_connect(); the outcome is reflected in subsequent
+ * WebSocket status pushes (wifi.mode, wifi.ip).
+ *
+ * @param req  Incoming HTTP POST request.
+ * @return ESP_OK; HTTP 400 is sent to the client on parse error.
+ */
 static esp_err_t handle_post_wifi(httpd_req_t *req)
 {
     char body[HTTP_BODY_MAX];
@@ -464,9 +573,18 @@ static esp_err_t handle_post_wifi(httpd_req_t *req)
 
 // ---------------------------------------------------------------------------
 // POST /config/time
-// Body: { "time":"2026-05-04T14:30" }  (datetime-local input format)
 // ---------------------------------------------------------------------------
 
+/**
+ * @brief Handle POST /config/time — set the system clock via settimeofday().
+ *
+ * JSON body: @code { "time":"2026-05-04T14:30" } @endcode
+ * Accepts the @c datetime-local HTML format (YYYY-MM-DDTHH:MM) and the
+ * extended form with seconds (YYYY-MM-DDTHH:MM:SS).
+ *
+ * @param req  Incoming HTTP POST request.
+ * @return ESP_OK; HTTP 400 is sent to the client on parse error.
+ */
 static esp_err_t handle_post_time(httpd_req_t *req)
 {
     char body[128];
@@ -507,9 +625,17 @@ static esp_err_t handle_post_time(httpd_req_t *req)
 
 // ---------------------------------------------------------------------------
 // POST /config/ntp
-// Body: { "server":"pool.ntp.org" }
 // ---------------------------------------------------------------------------
 
+/**
+ * @brief Handle POST /config/ntp — persist the NTP server hostname to NVS.
+ *
+ * JSON body: @code { "server":"pool.ntp.org" } @endcode
+ * Phase 9 will read this key and reinitialise SNTP with the saved hostname.
+ *
+ * @param req  Incoming HTTP POST request.
+ * @return ESP_OK; HTTP 400 is sent to the client on parse error.
+ */
 static esp_err_t handle_post_ntp(httpd_req_t *req)
 {
     char body[128];
@@ -540,12 +666,29 @@ static esp_err_t handle_post_ntp(httpd_req_t *req)
 // Phase 11/12 stubs
 // ---------------------------------------------------------------------------
 
+/**
+ * @brief Drain and discard all remaining bytes in the HTTP request body.
+ *
+ * Called by stub handlers before sending a response to prevent the httpd
+ * pipeline from stalling on an unconsumed body.
+ *
+ * @param req  Incoming HTTP request whose body should be discarded.
+ */
 static void drain_body(httpd_req_t *req)
 {
     char discard[64];
     while (httpd_req_recv(req, discard, sizeof(discard)) > 0) {}
 }
 
+/**
+ * @brief Return HTTP 501 Not Implemented for endpoints not yet built.
+ *
+ * Used as the handler for POST /replay/upload and POST /replay/control
+ * until Phase 11 is implemented.  Drains the request body before responding.
+ *
+ * @param req  Incoming HTTP POST request.
+ * @return ESP_OK.
+ */
 static esp_err_t handle_not_implemented(httpd_req_t *req)
 {
     drain_body(req);
@@ -555,6 +698,16 @@ static esp_err_t handle_not_implemented(httpd_req_t *req)
     return ESP_OK;
 }
 
+/**
+ * @brief Handle POST /log/clear — broadcast a @c log_clear WebSocket event.
+ *
+ * Drains the request body (no JSON payload expected), then broadcasts
+ * @c {"type":"log_clear"} to all connected clients so the GUI table resets.
+ * Phase 12 will also flush the in-memory log queue here.
+ *
+ * @param req  Incoming HTTP POST request.
+ * @return ESP_OK.
+ */
 static esp_err_t handle_post_log_clear(httpd_req_t *req)
 {
     drain_body(req);
@@ -567,9 +720,17 @@ static esp_err_t handle_post_log_clear(httpd_req_t *req)
 }
 
 // ---------------------------------------------------------------------------
-// WebSocket push task (1 Hz status broadcast)
+// WebSocket push task
 // ---------------------------------------------------------------------------
 
+/**
+ * @brief FreeRTOS task: build and broadcast a status JSON frame every 1 s.
+ *
+ * Runs for the lifetime of the application.  Stack size is WS_PUSH_STACK
+ * bytes.  The task blocks on vTaskDelay between broadcasts, so it does not
+ * busy-wait.  If @c s_server is not yet ready the iteration is skipped.
+ * The FreeRTOS task parameter is unused.
+ */
 static void ws_push_task(void * /*arg*/)
 {
     char json[STATUS_JSON_MAX];

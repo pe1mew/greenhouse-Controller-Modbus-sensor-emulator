@@ -55,6 +55,12 @@
 // Arduino entry points
 // ---------------------------------------------------------------------------
 
+/**
+ * @brief Arduino setup: initialise all hardware and start FreeRTOS tasks.
+ *
+ * Runs once after reset.  Configures the serial port, LEDs, RS-485, NVS,
+ * shared sensor state, Modbus slave, WiFi manager, and HTTP/WebSocket server.
+ */
 void setup()
 {
     Serial.begin(115200);
@@ -99,6 +105,12 @@ void setup()
     web_server_init();
 }
 
+/**
+ * @brief Arduino loop: yields to the FreeRTOS scheduler.
+ *
+ * All application work is performed in FreeRTOS tasks.  This function simply
+ * calls vTaskDelay() so that the idle task can run.
+ */
 void loop()
 {
     // All work is done in FreeRTOS tasks; keep loop() yielding.

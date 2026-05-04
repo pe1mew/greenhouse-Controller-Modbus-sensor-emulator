@@ -26,22 +26,28 @@
 // Internal task-notification bits (not the public EventGroup)
 // ---------------------------------------------------------------------------
 
+/** @brief Task-notification bit set when STA obtains an IP address. */
 #define NOTIFY_STA_GOT_IP  (1u << 0)
+/** @brief Task-notification bit set when STA disconnects. */
 #define NOTIFY_STA_DISC    (1u << 1)
 
 // ---------------------------------------------------------------------------
 // Connect-request struct — posted to s_connect_q by wifi_manager_connect()
 // ---------------------------------------------------------------------------
 
+/**
+ * @brief Request record posted to the connect queue by wifi_manager_connect().
+ */
 typedef struct {
-    char ssid[NVS_STR_MAX_SSID];
-    char pass[NVS_STR_MAX_PASS];
+    char ssid[NVS_STR_MAX_SSID]; /**< @brief SSID of the network to join. */
+    char pass[NVS_STR_MAX_PASS]; /**< @brief WPA2 passphrase (NUL-terminated). */
 } connect_req_t;
 
 // ---------------------------------------------------------------------------
 // Module statics
 // ---------------------------------------------------------------------------
 
+/** @cond INTERNAL */
 static EventGroupHandle_t          s_evt_grp     = nullptr;
 static QueueHandle_t               s_connect_q   = nullptr;
 static TaskHandle_t                s_task_handle = nullptr;
@@ -49,12 +55,21 @@ static volatile wifi_manager_state_t s_state     = WIFI_STATE_AP;
 static char                        s_ap_ssid[32] = {};
 static char                        s_sta_ip[16]  = {};
 static bool                        s_mdns_up     = false;
+/** @endcond */
 
 // ---------------------------------------------------------------------------
-// WiFi event callback — runs in the ESP-IDF event-loop task.
-// Only sets task-notification bits; never calls WiFi/mDNS APIs.
+// WiFi event callback
 // ---------------------------------------------------------------------------
 
+/**
+ * @brief Translate Arduino WiFi events into FreeRTOS task-notification bits.
+ *
+ * Runs in the ESP-IDF event-loop task, not in wifi_manager_task, so it must
+ * not call any WiFi or mDNS APIs directly.  It only calls xTaskNotify() to
+ * set NOTIFY_STA_GOT_IP or NOTIFY_STA_DISC on @c s_task_handle.
+ *
+ * @param event  Arduino WiFi event code delivered by the ESP-IDF event loop.
+ */
 static void wifi_event_cb(WiFiEvent_t event)
 {
     if (!s_task_handle) { return; }
@@ -71,9 +86,25 @@ static void wifi_event_cb(WiFiEvent_t event)
 }
 
 // ---------------------------------------------------------------------------
-// Manager task — all WiFi / mDNS calls happen here
+// Manager task
 // ---------------------------------------------------------------------------
 
+/**
+ * @brief WiFi/mDNS finite-state machine — runs for the lifetime of the firmware.
+ *
+ * All WiFi and mDNS API calls are confined to this task.  On startup it:
+ *  1. Registers wifi_event_cb.
+ *  2. Enables combined AP+STA mode and starts the open access point.
+ *  3. Attempts a STA connection using NVS credentials (if any).
+ *
+ * The main loop then:
+ *  - Drains the connect-request queue (populated by wifi_manager_connect()).
+ *  - Waits up to 500 ms for task-notification bits set by wifi_event_cb.
+ *  - Transitions between AP, CONNECTING and STA states, starts/stops mDNS,
+ *    and signals the public EventGroup accordingly.
+ *
+ * @param arg  Unused (FreeRTOS task parameter).
+ */
 static void wifi_manager_task(void *arg)
 {
     // Register event handler before enabling WiFi.
@@ -146,11 +177,11 @@ static void wifi_manager_task(void *arg)
             s_state = WIFI_STATE_STA;
             Serial.println("[wifi] AP disabled");
 
-            // Register mDNS hostname "emulator" → http://emulator.local
-            if (MDNS.begin("emulator")) {
+            // Register mDNS hostname "sensor-emulator" → http://sensor-emulator.local
+            if (MDNS.begin("sensor-emulator")) {
                 MDNS.addService("http", "tcp", 80);
                 s_mdns_up = true;
-                Serial.println("[wifi] mDNS started  http://emulator.local");
+                Serial.println("[wifi] mDNS started  http://sensor-emulator.local");
             } else {
                 Serial.println("[wifi] mDNS MDNS.begin() failed");
             }

@@ -1,6 +1,6 @@
 /**
  * @file modbus_crc.h
- * @brief Modbus CRC-16/IBM checksum \u2014 Phase 2.
+ * @brief Modbus CRC-16/IBM checksum -- Phase 2.
  *
  * Implements the standard Modbus CRC-16/IBM algorithm:
  *   - Initial value: 0xFFFF

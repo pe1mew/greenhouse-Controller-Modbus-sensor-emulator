@@ -59,6 +59,18 @@ CRGB leds[NUM_LEDS];
 // ---------------------------------------------------------------------------
 // CRC-16/IBM (Modbus RTU)
 // ---------------------------------------------------------------------------
+
+/**
+ * @brief Compute the Modbus CRC-16/IBM (CRC-16/ARC) over a byte buffer.
+ *
+ * Initialises the accumulator to 0xFFFF and processes each byte with the
+ * reflected polynomial 0xA001.  The result is appended to frames
+ * little-endian (low byte first).
+ *
+ * @param buf  Pointer to the data bytes.
+ * @param len  Number of bytes to process.
+ * @return 16-bit CRC.
+ */
 static uint16_t modbusCRC16(const uint8_t *buf, uint8_t len)
 {
     uint16_t crc = 0xFFFF;
@@ -74,12 +86,25 @@ static uint16_t modbusCRC16(const uint8_t *buf, uint8_t len)
 // ---------------------------------------------------------------------------
 // LED helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * @brief Set the WS2812B LED to @p color and latch immediately.
+ * @param color  FastLED CRGB colour value.
+ */
 static void setLED(CRGB color)
 {
     leds[0] = color;
     FastLED.show();
 }
 
+/**
+ * @brief Flash the LED @p color for @p ms milliseconds, then restore blue.
+ *
+ * Used to give brief visual feedback when a request is received and processed.
+ *
+ * @param color  FastLED CRGB colour value for the flash.
+ * @param ms     Flash duration in milliseconds (default 80 ms).
+ */
 static void flashLED(CRGB color, uint16_t ms = 80)
 {
     setLED(color);
@@ -90,6 +115,18 @@ static void flashLED(CRGB color, uint16_t ms = 80)
 // ---------------------------------------------------------------------------
 // Transmit a response frame and drain the RS485 echo from RX
 // ---------------------------------------------------------------------------
+
+/**
+ * @brief Transmit @p resp over RS485 and discard the hardware echo bytes.
+ *
+ * The Atomic RS485 Base auto-asserts DE during transmission, so every
+ * transmitted byte is also received on RX.  This function waits for all
+ * echo bytes to arrive and then drains them so they do not corrupt the next
+ * incoming request.
+ *
+ * @param resp     Pointer to the response bytes to send.
+ * @param respLen  Number of bytes to send.
+ */
 static void sendResponse(const uint8_t *resp, uint8_t respLen)
 {
     Serial2.write(resp, respLen);
@@ -107,6 +144,18 @@ static void sendResponse(const uint8_t *resp, uint8_t respLen)
 // ---------------------------------------------------------------------------
 // Send a Modbus exception response
 // ---------------------------------------------------------------------------
+
+/**
+ * @brief Build and transmit a Modbus exception response frame.
+ *
+ * The frame format is: [addr][fc|0x80][exceptionCode][crcL][crcH].
+ * Also logs the exception to the serial console.
+ *
+ * @param addr           Slave address echoed in the response.
+ * @param fc             Function code of the request (MSB is set to 1 in the response).
+ * @param exceptionCode  Modbus exception code (e.g. 0x01 Illegal Function,
+ *                       0x02 Illegal Data Address, 0x03 Illegal Data Value).
+ */
 static void sendException(uint8_t addr, uint8_t fc, uint8_t exceptionCode)
 {
     uint8_t resp[5];
@@ -125,6 +174,23 @@ static void sendException(uint8_t addr, uint8_t fc, uint8_t exceptionCode)
 // ---------------------------------------------------------------------------
 // Send a FC03 / FC04 register read response
 // ---------------------------------------------------------------------------
+
+/**
+ * @brief Validate a register read request and transmit the data response.
+ *
+ * Checks that @p quantity is non-zero, ≤ 125, and that the range
+ * [@p startReg, @p startReg + @p quantity) lies within @p regCount.
+ * Sends exception 0x02 (Illegal Data Address) if the range is invalid;
+ * otherwise builds the standard @c [addr][fc][byteCount][data...][crc]
+ * frame and calls sendResponse().
+ *
+ * @param addr      Slave address echoed in the response.
+ * @param fc        Function code echoed in the response (0x03 or 0x04).
+ * @param regs      Register data array.
+ * @param regCount  Total number of registers in @p regs.
+ * @param startReg  First register index requested by the master.
+ * @param quantity  Number of registers requested.
+ */
 static void sendRegisterResponse(uint8_t addr, uint8_t fc,
                                   const uint16_t *regs, uint8_t regCount,
                                   uint16_t startReg, uint16_t quantity)
@@ -156,6 +222,20 @@ static void sendRegisterResponse(uint8_t addr, uint8_t fc,
 // ---------------------------------------------------------------------------
 // Process a complete received frame
 // ---------------------------------------------------------------------------
+
+/**
+ * @brief Validate and dispatch a complete Modbus RTU request frame.
+ *
+ * Verifies the CRC, ignores broadcasts and unknown addresses, checks the
+ * frame is at least 8 bytes for a register-read request, then routes to
+ * sendRegisterResponse() for the two served addresses or sendException()
+ * for unsupported function codes.
+ *
+ * LED feedback: green = answered, yellow = ignored/unsupported FC, red = CRC error.
+ *
+ * @param buf  Pointer to the complete received frame.
+ * @param len  Length of the frame in bytes (must be ≥ 4 to be considered).
+ */
 static void processFrame(const uint8_t *buf, uint8_t len)
 {
     if (len < 4) return;

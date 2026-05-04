@@ -6,6 +6,60 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ---
 
+## [0.7.2] — 2026-05-04  mDNS rename · WebSocket state-sync · Doxygen clean
+
+### Fixed — firmware (`firmware/sensorEmulator/`)
+- `wifi/wifi_manager.cpp` — mDNS hostname renamed `"emulator"` → `"sensor-emulator"`;
+  device is now reachable at **http://sensor-emulator.local** after STA connect.
+- `web/web_server.cpp` — `build_status_json()` extended to include `fg.mode`,
+  `fg.addr`, `s200.mode`, `s200.addr`, and `s200.heat` in every 1 Hz WebSocket push.
+  Previously those fields were absent, so a browser connecting over STA saw
+  HTML-default values in the control panel instead of the device's actual state.
+
+### Fixed — web assets (`firmware/data/`)
+- `data/app.js`:
+  - Added `wsInitialized` flag (reset on WebSocket close/reconnect).  On the
+    **first** status message after connect, all editable controls (address inputs,
+    mode radio buttons, sliders, number inputs) are populated from the device
+    state received in that message.  Subsequent pushes only refresh the read-only
+    status display, so in-progress user edits are not overwritten.
+- `data/index.html` — hint text updated: `http://emulator.local` →
+  `http://sensor-emulator.local`.
+
+### Fixed — documentation (`firmware/sensorEmulator/` Doxygen)
+- Achieved **zero Doxygen warnings** (Doxygen 1.17.0) across the entire firmware
+  source tree.  Specific fixes:
+  - `modbus/modbus_crc.h` — replaced literal `\u2014` (em dash) with `--` in
+    `@brief`; Doxygen 1.17.0 was treating the backslash as an unknown command.
+  - `sensors/sensor_state.h` — added `@brief` doc block to the `sensor_state_t`
+    typedef struct.
+  - `wifi/wifi_manager.cpp` — documented `NOTIFY_STA_GOT_IP`/`NOTIFY_STA_DISC`
+    macros; documented `connect_req_t` struct + members; wrapped module statics
+    in `@cond INTERNAL`/`@endcond`; replaced `@ref s_task_handle` (unresolvable
+    static) with `@c s_task_handle`.
+  - `modbus/modbus_slave.cpp` — documented `handler_entry_t` struct + members;
+    wrapped `s_addr_a`, `s_addr_b`, `s_handlers[]`, `s_handler_count` in
+    `@cond`/`@endcond`.
+  - `web/web_server.cpp` — documented all 5 config constants; wrapped 3 module
+    statics in `@cond`/`@endcond`; documented `broadcast_ctx_t` members; removed
+    orphaned `@param arg` from `ws_push_task` (parameter name was commented out
+    in the C++ signature).
+  - `sensors/fg6485a_slave.cpp` — added `@brief` to all 8 `REG_*` register-range
+    constants.
+  - `sensors/s200_slave.cpp` — wrapped function-body `HI`/`LO` macros in
+    `@cond`/`@endcond`.
+  - `hal/led.cpp` — added `@brief` to `leds[NUM_LEDS]`.
+  - `config/nvs_config.cpp` — wrapped `s_nvs`/`s_nvs_ready` in
+    `@cond`/`@endcond`.
+  - `main.cpp` — added `@brief` doc blocks to `setup()` and `loop()`.
+
+### Verified
+- Build: SUCCESS, 0 errors, 0 warnings (Flash 69.1 %, RAM 14.6 %).
+- Doxygen: `*** Doxygen has finished` with zero `warning:` lines.
+- Flashed to hardware (COM5, ESP32-PICO-D4, MAC 14:2b:2f:a0:b7:8c).
+
+---
+
 ## [0.7.1] — 2026-05-04  Web Mock & GUI review fixes
 
 ### Added — web mock (`webMoc/`)
@@ -50,7 +104,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
   - Serves `index.html`, `style.css`, `app.js` from SPIFFS (chunked transfer).
   - WebSocket endpoint `/ws` — 1 Hz status push via `httpd_queue_work` +
     `httpd_ws_send_frame_async` pattern.  Status JSON: `{type:"status",
-    fg:{temp, hum}, s200:{spd, dir}, wifi:{mode, ip, rssi}, time, ntp_synced}`.
+    fg:{temp, hum, mode, addr}, s200:{spd, dir, heat, mode, addr},
+    wifi:{mode, ip, rssi}, time, ntp_synced}` (extended in v0.7.2).
   - `POST /config/sensor` — clamps physical values to design §11 ranges,
     writes `g_sensor_state` under mutex + NVS, returns clamped values +
     `"clamped":bool`.

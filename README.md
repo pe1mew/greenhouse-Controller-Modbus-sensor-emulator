@@ -2,6 +2,8 @@
 
 An ESP32-based Modbus RTU slave device that emulates two greenhouse sensors concurrently on a single RS485 bus: an **ASAIR FG6485A** temperature/humidity transmitter and a **Seeed SenseCAP S200** wind speed and direction meter. Intended as a development and test tool for systems that query these sensors.
 
+This project was developed to aid with the development of a [Greenhouse Controller](https://github.com/pe1mew/greenhouse-Controller).
+
 ## Features
 
 - Concurrent emulation of FG6485A (Modbus FC03, T/RH) and S200 (Modbus FC04, wind speed + direction)
@@ -60,14 +62,14 @@ greenhouse-Controller-Modbus-sensor-emulator/
 │   ├── sensorEmulator/         ← Application source code
 │   └── implementationPlan.md
 │
-├── webMock/                     ← Desktop web mock (Python / Flask)
+├── webMock/                    ← Desktop web mock (Python / Flask)
 │   ├── server.py               ← Emulates the Atom Lite HTTP + WebSocket interface
 │   ├── requirements.txt
 │   └── README.md
 │
 ├── design/
 │   ├── modbusSensorEmulator.md ← Full design plan
-│   └── webMock.md               ← Web mock implementation plan
+│   └── webMock.md              ← Web mock implementation plan
 │
 ├── documentation/              ← Driver source and datasheet references
 │   ├── code_FG6485A_driver/    ← FG6485A Modbus RTU driver (reference)

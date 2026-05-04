@@ -16,21 +16,45 @@
 // ---------------------------------------------------------------------------
 
 // FC03-readable ranges
-static constexpr uint16_t REG_MEAS_START    = 0x0000u;  // humidity
-static constexpr uint16_t REG_MEAS_END      = 0x0001u;  // temperature  (inclusive)
+/** @brief First FC03-readable measurement register (humidity). */
+static constexpr uint16_t REG_MEAS_START    = 0x0000u;
+/** @brief Last FC03-readable measurement register (temperature, inclusive). */
+static constexpr uint16_t REG_MEAS_END      = 0x0001u;
+/** @brief First FC03-readable device-info register. */
 static constexpr uint16_t REG_INFO_START    = 0x0008u;
+/** @brief Last FC03-readable device-info register (inclusive). */
 static constexpr uint16_t REG_INFO_END      = 0x000Bu;
+/** @brief First FC03-readable alarm-config register. */
 static constexpr uint16_t REG_ALARM_START   = 0x000Cu;
+/** @brief Last FC03-readable alarm-config register (inclusive). */
 static constexpr uint16_t REG_ALARM_END     = 0x0013u;
 
 // FC16-writable ranges
+/** @brief First FC16-writable register. */
 static constexpr uint16_t REG_WRITE_START   = 0x000Cu;
+/** @brief Last FC16-writable register (inclusive). */
 static constexpr uint16_t REG_WRITE_END     = 0x001Eu;
 
 // ---------------------------------------------------------------------------
 // Build a standard FC03/FC16 response header + CRC
 // ---------------------------------------------------------------------------
 
+/**
+ * @brief Serialise a register-read response frame into @p resp.
+ *
+ * Produces a complete Modbus RTU frame:
+ * @code
+ *   [addr][fc][byte_count][word0_hi][word0_lo]...[crc_lo][crc_hi]
+ * @endcode
+ * The CRC covers all bytes from @p resp[0] to the last data byte.
+ *
+ * @param addr      Slave address echoed in the response.
+ * @param fc        Function code echoed in the response (0x03).
+ * @param words     Array of register values in big-endian word order.
+ * @param qty       Number of 16-bit words in @p words.
+ * @param resp      Output buffer (must be at least 3 + qty*2 + 2 bytes).
+ * @param resp_len  Set to the total number of bytes written to @p resp.
+ */
 static void build_read_response(uint8_t addr, uint8_t fc,
                                  const uint16_t *words, uint8_t qty,
                                  uint8_t *resp, uint8_t *resp_len)
@@ -51,10 +75,20 @@ static void build_read_response(uint8_t addr, uint8_t fc,
 }
 
 // ---------------------------------------------------------------------------
-// Read a single register value from g_sensor_state (called under mutex)
-// Returns false if address is not readable via FC03.
+// Read a single register value from g_sensor_state
 // ---------------------------------------------------------------------------
 
+/**
+ * @brief Map a single FC03 register address to its value in g_sensor_state.
+ *
+ * Must be called with g_sensor_state.mutex already held.  Covers the
+ * measurement (0x0000–0x0001), device-info (0x0008–0x000B), and alarm-config
+ * (0x000C–0x0013) readable ranges defined in the FG6485A register map.
+ *
+ * @param reg  Modbus register address.
+ * @param out  Set to the register value on success; unchanged on failure.
+ * @return @c true if the register is FC03-readable, @c false otherwise.
+ */
 static bool read_register(uint16_t reg, uint16_t *out)
 {
     switch (reg) {
@@ -77,10 +111,20 @@ static bool read_register(uint16_t reg, uint16_t *out)
 }
 
 // ---------------------------------------------------------------------------
-// Write a single register value to g_sensor_state (called under mutex)
-// Returns false if the address is not writable via FC16.
+// Write a single register value to g_sensor_state
 // ---------------------------------------------------------------------------
 
+/**
+ * @brief Write a single FC16 register value into g_sensor_state.
+ *
+ * Must be called with g_sensor_state.mutex already held.  Only the
+ * alarm-config (0x000C–0x0013) and correction-offset (0x001D–0x001E)
+ * writable registers are accepted; all others are rejected.
+ *
+ * @param reg    Modbus register address.
+ * @param value  16-bit value to write.
+ * @return @c true if the register is FC16-writable, @c false otherwise.
+ */
 static bool write_register(uint16_t reg, uint16_t value)
 {
     switch (reg) {
@@ -102,6 +146,19 @@ static bool write_register(uint16_t reg, uint16_t value)
 // FC03 handler
 // ---------------------------------------------------------------------------
 
+/**
+ * @brief Modbus FC03 (Read Holding Registers) handler for the FG6485A slave.
+ *
+ * Validates quantity (1–125) and that every requested register address is
+ * FC03-readable, then snapshots the values under g_sensor_state.mutex and
+ * builds the response via build_read_response().  Returns exception 0x02
+ * (Illegal Data Address) or 0x03 (Illegal Data Value) on bad inputs.
+ *
+ * @param req      Full received Modbus RTU frame (address through CRC).
+ * @param req_len  Length of @p req in bytes (unused internally).
+ * @param resp     Output buffer for the response frame.
+ * @param resp_len Set to the number of bytes written to @p resp.
+ */
 static void fg6485a_fc03(const uint8_t *req, uint8_t req_len,
                           uint8_t *resp, uint8_t *resp_len)
 {
@@ -145,6 +202,20 @@ static void fg6485a_fc03(const uint8_t *req, uint8_t req_len,
 // FC16 handler
 // ---------------------------------------------------------------------------
 
+/**
+ * @brief Modbus FC16 (Write Multiple Registers) handler for the FG6485A slave.
+ *
+ * Validates quantity (1–123) and that every target register is FC16-writable
+ * before touching the mutex.  Applies all writes atomically under
+ * g_sensor_state.mutex and returns the standard FC16 echo response (8 bytes).
+ * Returns exception 0x02 (Illegal Data Address) or 0x03 (Illegal Data Value)
+ * on bad inputs.
+ *
+ * @param req      Full received Modbus RTU frame.
+ * @param req_len  Length of @p req in bytes (unused internally).
+ * @param resp     Output buffer for the response frame.
+ * @param resp_len Set to the number of bytes written to @p resp.
+ */
 static void fg6485a_fc16(const uint8_t *req, uint8_t req_len,
                           uint8_t *resp, uint8_t *resp_len)
 {

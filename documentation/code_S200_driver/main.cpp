@@ -45,6 +45,16 @@ static const uint8_t SENSOR_ADDR = S200_DEFAULT_ADDR;  /* 44 */
 static int pass_count = 0;
 static int fail_count = 0;
 
+/**
+ * @brief Record a pass/fail test result and print it to the serial console.
+ *
+ * Increments pass_count or fail_count, then prints
+ * @c "[PASS] id: description" or @c "[FAIL] id: description".
+ *
+ * @param id          Short test identifier (e.g. "HW-S200-001").
+ * @param description Human-readable description of what is being checked.
+ * @param condition   @c true → pass, @c false → fail.
+ */
 static void check(const char *id, const char *description, bool condition)
 {
     if (condition) {
@@ -59,6 +69,12 @@ static void check(const char *id, const char *description, bool condition)
     Serial.println(description);
 }
 
+/**
+ * @brief Convert an s200_status_t code to a human-readable string.
+ *
+ * @param s  Status code returned by an s200_* API function.
+ * @return   Pointer to a string literal describing the status.
+ */
 static const char *s200_status_str(s200_status_t s)
 {
     switch (s) {
@@ -77,6 +93,14 @@ static const char *s200_status_str(s200_status_t s)
  * Frame: 2C 04 00 08 00 06 <CRC-low> <CRC-high>
  * CRC for that payload: 2C 04 00 08 00 06 → CRC = 0x57E1 (little-endian: E1 57)
  * --------------------------------------------------------------------------- */
+
+/**
+ * @brief Send the hardcoded FC04 request frame and dump all raw bytes received.
+ *
+ * Bypasses all Modbus framing so even a garbled response is visible.
+ * Useful as a first-pass wiring and polarity check before running formal tests.
+ * Prints nothing (or "(none)") if the sensor does not respond within 300 ms.
+ */
 static void diag_raw_receive(void)
 {
     Serial.println();
@@ -126,6 +150,14 @@ static void diag_raw_receive(void)
  * Issues an FC04 read (reg 0x0008, count 6) to each address in turn.
  * The first address that responds is reported with raw register values.
  * --------------------------------------------------------------------------- */
+
+/**
+ * @brief Scan Modbus addresses 1–60 and report the first one that responds.
+ *
+ * Issues an FC04 read of registers 0x0008–0x000D (wind direction fields) to
+ * each address and prints the raw word pairs for the first responding device.
+ * Useful when the factory default address (44) has been changed.
+ */
 static void diag_address_scan(void)
 {
     Serial.println();

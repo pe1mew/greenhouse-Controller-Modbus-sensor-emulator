@@ -47,6 +47,16 @@ static const uint8_t SENSOR_ADDR = FG6485A_DEFAULT_ADDR;
 static int pass_count = 0;
 static int fail_count = 0;
 
+/**
+ * @brief Record a pass/fail test result and print it to the serial console.
+ *
+ * Increments pass_count or fail_count, then prints
+ * @c "[PASS] id: description" or @c "[FAIL] id: description".
+ *
+ * @param id          Short test identifier (e.g. "HW-FG-001").
+ * @param description Human-readable description of what is being checked.
+ * @param condition   @c true → pass, @c false → fail.
+ */
 static void check(const char *id, const char *description, bool condition)
 {
     if (condition) {
@@ -61,6 +71,12 @@ static void check(const char *id, const char *description, bool condition)
     Serial.println(description);
 }
 
+/**
+ * @brief Convert a fg6485a_status_t code to a human-readable string.
+ *
+ * @param s  Status code returned by a fg6485a_* API function.
+ * @return   Pointer to a string literal describing the status.
+ */
 static const char *fg_status_str(fg6485a_status_t s)
 {
     switch (s) {
@@ -79,6 +95,14 @@ static const char *fg_status_str(fg6485a_status_t s)
  * then prints every byte received within 300 ms, bypassing all framing.
  * If the sensor responds at all — even with a garbled frame — we see it.
  * --------------------------------------------------------------------------- */
+
+/**
+ * @brief Send the hardcoded datasheet example request and dump all raw bytes received.
+ *
+ * Bypasses all Modbus framing so that even a garbled or unexpected response
+ * is visible.  Useful as a first-pass wiring and polarity check.
+ * Prints nothing (or "(none)") if the sensor does not respond within 300 ms.
+ */
 static void diag_raw_receive(void)
 {
     Serial.println();
@@ -131,6 +155,15 @@ static void diag_raw_receive(void)
  * The first address that responds is reported with its raw register values.
  * Worst-case duration: 20 × 200 ms timeout = 4 s.
  * --------------------------------------------------------------------------- */
+
+/**
+ * @brief Scan Modbus addresses 1–20 and report the first one that responds.
+ *
+ * Issues an FC03 read of registers 0x0000–0x0001 to each address and prints
+ * the raw humidity and temperature values for the first responding address.
+ * Useful when the DIP switch position is uncertain.
+ * Worst-case scan time: 20 × 200 ms ≈ 4 s.
+ */
 static void diag_address_scan(void)
 {
     Serial.println();

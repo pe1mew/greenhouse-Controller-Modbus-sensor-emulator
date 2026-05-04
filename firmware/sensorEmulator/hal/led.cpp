@@ -8,6 +8,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
+/** @brief FastLED pixel buffer for the single WS2812B LED. */
 static CRGB leds[NUM_LEDS];
 
 void led_init(void)

@@ -13,6 +13,7 @@ function wsConnect() {
 
   ws.onclose = function () {
     setBadge('ws-badge', 'Offline', 'offline');
+    wsInitialized = false;
     setTimeout(wsConnect, 3000);
   };
 
@@ -29,6 +30,8 @@ function wsConnect() {
 }
 
 // ── Status update ────────────────────────────────────────────────────────
+let wsInitialized = false;
+
 function handleStatus(s) {
   if (s.fg) {
     setText('st-fg-temp', s.fg.temp !== undefined ? s.fg.temp.toFixed(1) : '—');
@@ -37,6 +40,36 @@ function handleStatus(s) {
   if (s.s200) {
     setText('st-s200-spd', s.s200.spd !== undefined ? s.s200.spd.toFixed(0) : '—');
     setText('st-s200-dir', s.s200.dir !== undefined ? s.s200.dir.toFixed(0) : '—');
+  }
+
+  // On first message: sync all editable controls to the device's current state.
+  if (!wsInitialized) {
+    wsInitialized = true;
+    if (s.fg) {
+      if (s.fg.addr !== undefined) {
+        const el = document.getElementById('fg-addr');
+        if (el) el.value = s.fg.addr;
+      }
+      if (s.fg.mode !== undefined) {
+        const r = document.querySelector('input[name="fg-mode"][value="' + s.fg.mode + '"]');
+        if (r) r.checked = true;
+      }
+      if (s.fg.temp !== undefined) setSliderInput('fg-temp-sl', 'fg-temp-in', s.fg.temp);
+      if (s.fg.hum  !== undefined) setSliderInput('fg-hum-sl',  'fg-hum-in',  s.fg.hum);
+    }
+    if (s.s200) {
+      if (s.s200.addr !== undefined) {
+        const el = document.getElementById('s200-addr');
+        if (el) el.value = s.s200.addr;
+      }
+      if (s.s200.mode !== undefined) {
+        const r = document.querySelector('input[name="s200-mode"][value="' + s.s200.mode + '"]');
+        if (r) r.checked = true;
+      }
+      if (s.s200.spd  !== undefined) setSliderInput('s200-spd-sl',  's200-spd-in',  s.s200.spd);
+      if (s.s200.dir  !== undefined) setSliderInput('s200-dir-sl',  's200-dir-in',  s.s200.dir);
+      if (s.s200.heat !== undefined) setSliderInput('s200-heat-sl', 's200-heat-in', s.s200.heat);
+    }
   }
   if (s.wifi) {
     setText('st-wifi-mode', s.wifi.mode || '—');

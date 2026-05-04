@@ -117,6 +117,13 @@ typedef enum {
 // Shared state struct
 // ---------------------------------------------------------------------------
 
+/**
+ * @brief Aggregated emulator state for all sensors.
+ *
+ * Single instance @ref g_sensor_state.  All fields are protected by the
+ * embedded @c mutex; callers must hold the mutex for the duration of any
+ * read or write operation.
+ */
 typedef struct {
 
     // --- FG6485A ---

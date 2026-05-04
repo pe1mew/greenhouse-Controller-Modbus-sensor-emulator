@@ -111,7 +111,8 @@ Pinout is identical to the existing test-client in
 │  wifi_manager_task                                        │
 │    Starts AP ("SensorEmulator-<AABB>", no password)       │
 │    Switches to client mode on successful STA connect      │
-│    Registers mDNS hostname "emulator.local" on STA up     │
+│    Registers mDNS hostname "sensor-emulator" on STA up    │
+│    Reachable at http://sensor-emulator.local              │
 │    Disables AP once STA link is up                        │
 └───────────────────────────────────────────────────────────┘
 ```

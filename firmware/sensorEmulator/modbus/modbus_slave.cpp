@@ -16,8 +16,10 @@
 // Slave address configuration
 // ---------------------------------------------------------------------------
 
+/** @cond INTERNAL */
 static uint8_t s_addr_a = 1;    // FG6485A (default)
 static uint8_t s_addr_b = 44;   // S200 (default, 44 = 0x2C)
+/** @endcond */
 
 void modbus_slave_set_addrs(uint8_t addr_a, uint8_t addr_b)
 {
@@ -29,14 +31,19 @@ void modbus_slave_set_addrs(uint8_t addr_a, uint8_t addr_b)
 // Handler table
 // ---------------------------------------------------------------------------
 
+/**
+ * @brief Registered (slave address, function code, handler) triple.
+ */
 struct handler_entry_t {
-    uint8_t              addr;
-    uint8_t              fc;
-    modbus_fc_handler_t  fn;
+    uint8_t              addr; /**< @brief Modbus slave address this entry responds to. */
+    uint8_t              fc;   /**< @brief Modbus function code this entry handles. */
+    modbus_fc_handler_t  fn;   /**< @brief Callback invoked when a matching frame arrives. */
 };
 
+/** @cond INTERNAL */
 static handler_entry_t s_handlers[MODBUS_MAX_HANDLERS];
 static uint8_t         s_handler_count = 0;
+/** @endcond */
 
 bool modbus_register_handler(uint8_t slave_addr, uint8_t fc,
                               modbus_fc_handler_t handler)
@@ -57,6 +64,17 @@ bool modbus_register_handler(uint8_t slave_addr, uint8_t fc,
     return true;
 }
 
+/**
+ * @brief Look up a registered handler for the given slave address and function code.
+ *
+ * Searches the s_handlers table linearly.  Expected to be called once per
+ * received frame; the table is small (\<= MODBUS_MAX_HANDLERS entries) so
+ * linear search is adequate.
+ *
+ * @param addr  Modbus slave address (1–247).
+ * @param fc    Function code (e.g. 0x03, 0x04, 0x10).
+ * @return Pointer to the matching handler, or @c nullptr if not found.
+ */
 static modbus_fc_handler_t find_handler(uint8_t addr, uint8_t fc)
 {
     for (uint8_t i = 0; i < s_handler_count; i++) {
@@ -87,6 +105,17 @@ void modbus_build_exception(uint8_t addr, uint8_t fc, uint8_t exception_code,
 // Serial hex-dump helper
 // ---------------------------------------------------------------------------
 
+/**
+ * @brief Print a Modbus frame to the serial console as a hex string.
+ *
+ * Outputs @p prefix followed by each byte as two uppercase hex digits separated
+ * by spaces, then a newline.  Used to log both received (RX) and transmitted
+ * (TX) frames for debugging.
+ *
+ * @param prefix  Label string printed before the hex dump (e.g. "[modbus] RX →").
+ * @param buf     Pointer to the frame bytes.
+ * @param len     Number of bytes to print.
+ */
 static void log_frame(const char *prefix, const uint8_t *buf, uint8_t len)
 {
     Serial.print(prefix);
