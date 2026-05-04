@@ -1299,8 +1299,42 @@ the CSV.
 |-----------|-----------|
 | Single notify value used as start/stop signal | Two separate volatile booleans (`s_start_req`, `s_stop_req`) used to avoid notification-value race. |
 | Pre-flight: `ntp_is_synced()` OR manual time set | Simplified to epoch > 2020-01-01 check — same practical effect without requiring the NTP task's internal state. |
-| Clamping warnings posted to `log_queue` | Warnings printed to serial only (Phase 12 log infrastructure not yet implemented). |
+| Clamping warnings posted to `log_queue` | Warnings printed to serial only — Phase 12 log infrastructure not wired at Phase 11 implementation time. |
 | File upload handler "write bytes to SPIFFS" | Implemented as 256-byte chunked streaming via `httpd_req_recv()` — not a single bulk write — to keep stack usage O(1) relative to file size. |
 
+---
 
+## Phase 12 — Modbus Activity Log ✅
+
+**Firmware version**: 0.12.0  
+**Flashed**: COM5 — ESP32-PICO-D4 MAC `14:2b:2f:a0:b7:8c`  
+**Build metrics**: Flash 83.7 % (1,097,573 / 1,310,720 B) · RAM 15.3 % (50,256 / 327,680 B)
+
+### Changes implemented
+
+| File | Change |
+|------|--------|
+| `sensorEmulator/modbus/modbus_log.h` | **New** — `log_dir_t`, `log_entry_t` (ts + dir + frame[256] + len + summary[64]), API: `modbus_log_init/post/receive/clear` |
+| `sensorEmulator/modbus/modbus_log.cpp` | **New** — FreeRTOS queue (depth 32); non-blocking `xQueueSend`; `build_summary()` decodes FC01–FC06, FC10, exception responses |
+| `sensorEmulator/modbus/modbus_slave.cpp` | Added `#include "modbus_log.h"`; `modbus_log_post(LOG_DIR_RX, …)` after CRC-valid frame; `modbus_log_post(LOG_DIR_TX, …)` before `rs485_write` |
+| `sensorEmulator/web/web_server.cpp` | Added `#include "../modbus/modbus_log.h"`; new `broadcast_dyn_ctx_t` / `broadcast_dyn_cb()` / `ws_broadcast_dyn()` for heap-string WebSocket frames; `ws_push_task` drains log queue per cycle; `handle_post_log_clear` calls `modbus_log_clear()` |
+| `sensorEmulator/main.cpp` | `#include "modbus/modbus_log.h"`; `modbus_log_init()` after `sensor_state_init()`; banner → "Phase 12 Modbus Log" |
+
+### Verification
+
+| Scenario | Result |
+|----------|--------|
+| Boot banner shows "Phase 12 Modbus Log" | ⬜ Pending hardware test |
+| FC03 request → RX entry appears in web UI log table | ⬜ Pending hardware test |
+| FC03 response → TX entry appears in web UI log table | ⬜ Pending hardware test |
+| Summary decodes correctly: `FC03 addr=1 reg=0x0000 n=2` | ⬜ Pending hardware test |
+| Clear button → table empties; queue reset | ⬜ Pending hardware test |
+| Queue full (32 entries) → oldest entries dropped silently, no slave task blocking | ⬜ Pending hardware test |
+
+### Deviations from plan
+
+| Plan item | Deviation |
+|-----------|-----------|
+| Log CRC-invalid frames too | Only CRC-valid frames (addressed to our slave addresses) are logged. Bad-CRC frames hit `continue` before `modbus_log_post` — serial still prints them via `log_frame()`. |
+| `ws_push_task` uses fixed `broadcast_ctx_t` | Added separate `broadcast_dyn_ctx_t` / `ws_broadcast_dyn()` for log frames to avoid truncation of long hex strings; status JSON path unchanged. |
 

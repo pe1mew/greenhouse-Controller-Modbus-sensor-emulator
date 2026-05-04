@@ -54,6 +54,7 @@
 #include "hal/led.h"
 #include "hal/rs485.h"
 #include "modbus/modbus_slave.h"
+#include "modbus/modbus_log.h"
 #include "sensors/sensor_state.h"
 #include "sensors/fg6485a_slave.h"
 #include "sensors/s200_slave.h"
@@ -89,13 +90,17 @@ void setup()
 
     Serial.println();
     Serial.println("================================================");
-    Serial.println("  Modbus Sensor Emulator — Phase 11 Replay Mode");
+    Serial.println("  Modbus Sensor Emulator — Phase 12 Modbus Log");
     Serial.println("  M5Stack Atom Lite + Atomic RS485 Base");
     Serial.println("  9600 baud 8N1  |  LED G27  |  RX G22  TX G19");
     Serial.println("================================================");
 
     // Initialise shared state with hardcoded defaults and create mutex.
     sensor_state_init();
+
+    // Initialise Modbus activity log queue (Phase 12).
+    // Must run before modbus_slave_task starts.
+    modbus_log_init();
 
     // Override defaults with any values stored in NVS; retrieve slave addrs.
     uint8_t fg_addr   = 1;

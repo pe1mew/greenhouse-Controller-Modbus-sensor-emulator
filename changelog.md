@@ -6,6 +6,45 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ---
 
+## [0.12.0] — 2026-05-04  Phase 12 — Modbus Activity Log
+
+### Added — firmware (`firmware/sensorEmulator/`)
+- `modbus/modbus_log.h` / `modbus/modbus_log.cpp` — FreeRTOS queue-based
+  Modbus activity log.  Queue depth 32 (`log_entry_t`, ≈ 330 bytes each
+  ≈ 10.5 KB RAM).  Public API: `modbus_log_init()`, `modbus_log_post()`,
+  `modbus_log_receive()`, `modbus_log_clear()`.
+  `modbus_log_post()` is always non-blocking (`xQueueSend` with zero timeout)
+  so it cannot stall the high-priority Modbus slave task; entries are silently
+  dropped when the queue is full.  `build_summary()` decodes FC01–FC06 and
+  FC10 (Write Multiple Registers) into human-readable strings
+  (`"FC03 addr=1 reg=0x0000 n=2"`); exception responses show
+  `"FCxx EXCEPTION addr=n code=m"`.
+
+### Changed — firmware (`firmware/sensorEmulator/`)
+- `modbus/modbus_slave.cpp` — calls `modbus_log_post(LOG_DIR_RX, frame, len)`
+  after every CRC-valid addressed frame and
+  `modbus_log_post(LOG_DIR_TX, resp, len)` before every RS-485 transmission.
+- `web/web_server.cpp`:
+  - Added `broadcast_dyn_ctx_t` / `broadcast_dyn_cb()` / `ws_broadcast_dyn()`
+    — dynamic-allocation broadcast path that owns a heap JSON string so that
+    log messages with up to 256-byte hex payloads (≈ 900 B JSON) are sent
+    without truncation.
+  - `ws_push_task` now drains `modbus_log_receive()` in a loop after each
+    status push; each entry is serialised as
+    `{type:"log", ts, dir:"RX"|"TX", hex:"AA BB …", summary:"…"}` and
+    broadcast via `ws_broadcast_dyn()`.
+  - `handle_post_log_clear` now calls `modbus_log_clear()` before broadcasting
+    `{type:"log_clear"}`, so the in-memory queue and browser table are cleared
+    atomically.
+- `main.cpp` — calls `modbus_log_init()` after `sensor_state_init()` and
+  before `modbus_slave_task` starts; boot banner updated to Phase 12.
+
+### Build metrics (after Phase 12)
+- Flash: **83.7 %** (1,097,573 / 1,310,720 B)
+- RAM:   **15.3 %** (50,256 / 327,680 B)
+
+---
+
 ## [0.11.0] — 2026-05-04  Phase 11 — Replay Mode
 
 ### Added — firmware (`firmware/sensorEmulator/`)

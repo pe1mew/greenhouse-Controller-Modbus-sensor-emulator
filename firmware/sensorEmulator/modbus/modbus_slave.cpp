@@ -5,6 +5,7 @@
 
 #include "modbus_slave.h"
 #include "modbus_crc.h"
+#include "modbus_log.h"
 #include "../hal/rs485.h"
 #include "../hal/led.h"
 
@@ -178,6 +179,7 @@ void modbus_slave_task(void * /*arg*/)
 
         // ---- Valid frame for our address ----------------------------------
         log_frame("[modbus] RX →", req, req_len);
+        modbus_log_post(LOG_DIR_RX, req, req_len);
 
         uint8_t resp_len = 0;
         modbus_fc_handler_t handler = find_handler(addr, fc);
@@ -192,6 +194,7 @@ void modbus_slave_task(void * /*arg*/)
 
         if (resp_len > 0) {
             log_frame("[modbus] TX →", resp, resp_len);
+            modbus_log_post(LOG_DIR_TX, resp, resp_len);
             rs485_write(resp, resp_len);
         }
 
