@@ -26,6 +26,7 @@
 #include "../tasks/s200_mode_task.h"
 #include "../tasks/ntp_task.h"
 #include "../tasks/live_fetch_task.h"
+#include "../tasks/replay_task.h"
 
 #include <Arduino.h>
 #include <SPIFFS.h>
@@ -335,6 +336,16 @@ static void build_status_json(char *buf, size_t buf_size)
 
     cJSON_AddNumberToObject(root, "live_fetch_age", live_fetch_get_age_s());
     cJSON_AddBoolToObject(root, "live_fetch_ok",  live_fetch_was_ok() ? 1 : 0);
+
+    replay_state_t rs = replay_task_get_state();
+    const char *rs_str = (rs == REPLAY_RUNNING) ? "running"
+                       : (rs == REPLAY_DONE)    ? "done"
+                       : (rs == REPLAY_ERROR)   ? "error"
+                                                : "idle";
+    cJSON *rpl = cJSON_CreateObject();
+    cJSON_AddStringToObject(rpl, "state", rs_str);
+    cJSON_AddNumberToObject(rpl, "row",   replay_task_get_row());
+    cJSON_AddItemToObject(root, "replay", rpl);
 
     char *str = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
@@ -815,21 +826,134 @@ static void drain_body(httpd_req_t *req)
     while (httpd_req_recv(req, discard, sizeof(discard)) > 0) {}
 }
 
+/** @brief Maximum replay CSV upload size in bytes. */
+static constexpr size_t REPLAY_MAX_UPLOAD_BYTES = 200 * 1024;
+
 /**
- * @brief Return HTTP 501 Not Implemented for endpoints not yet built.
+ * @brief Handle POST /replay/upload — stream the request body to SPIFFS.
  *
- * Used as the handler for POST /replay/upload and POST /replay/control
- * until Phase 11 is implemented.  Drains the request body before responding.
+ * Accepts the CSV as a raw POST body (Content-Type: text/csv or
+ * application/octet-stream).  Replaces any existing /replay.csv.
+ * Stores the path in NVS and stops any running replay task.
+ *
+ * Response JSON: @code { "ok":true, "size":<bytes> } @endcode
  *
  * @param req  Incoming HTTP POST request.
  * @return ESP_OK.
  */
-static esp_err_t handle_not_implemented(httpd_req_t *req)
+static esp_err_t handle_replay_upload(httpd_req_t *req)
 {
-    drain_body(req);
-    httpd_resp_set_status(req, "501 Not Implemented");
+    if (req->content_len == 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Empty body");
+        return ESP_OK;
+    }
+    if (req->content_len > REPLAY_MAX_UPLOAD_BYTES) {
+        drain_body(req);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "File too large (max 200 KB)");
+        return ESP_OK;
+    }
+
+    // Stop any running replay before overwriting the file.
+    replay_task_stop();
+    vTaskDelay(pdMS_TO_TICKS(100));  // allow task to see the stop flag
+
+    // Remove stale file so SPIFFS reclaims the space.
+    if (SPIFFS.exists("/replay.csv")) {
+        SPIFFS.remove("/replay.csv");
+    }
+
+    File f = SPIFFS.open("/replay.csv", "w");
+    if (!f) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                            "Cannot create /replay.csv");
+        return ESP_OK;
+    }
+
+    char   chunk[256];
+    int    total     = 0;
+    int    remaining = (int)req->content_len;
+    bool   write_err = false;
+
+    while (remaining > 0 && !write_err) {
+        int to_read  = remaining < (int)sizeof(chunk) ? remaining : (int)sizeof(chunk);
+        int received = httpd_req_recv(req, chunk, to_read);
+        if (received <= 0) break;
+        size_t written = f.write((uint8_t *)chunk, (size_t)received);
+        if (written < (size_t)received) {
+            write_err = true;
+            Serial.println("[web/replay] SPIFFS write failed");
+        }
+        total     += received;
+        remaining -= received;
+    }
+    f.close();
+
+    if (write_err) {
+        SPIFFS.remove("/replay.csv");
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Disk write error");
+        return ESP_OK;
+    }
+
+    nvs_cfg_set_str(NVS_KEY_REPLAY_FILE, "/replay.csv");
+    Serial.printf("[web/replay] Uploaded %d bytes → /replay.csv\n", total);
+
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddBoolToObject(resp, "ok",   1);
+    cJSON_AddNumberToObject(resp, "size", total);
+    char *resp_str = cJSON_PrintUnformatted(resp);
+    cJSON_Delete(resp);
     httpd_resp_set_type(req, "application/json");
-    httpd_resp_sendstr(req, "{\"error\":\"not implemented\"}");
+    httpd_resp_sendstr(req, resp_str ? resp_str : "{\"ok\":true}");
+    free(resp_str);
+    return ESP_OK;
+}
+
+/**
+ * @brief Handle POST /replay/control — start or stop playback.
+ *
+ * JSON body: @code { "action": "start" | "stop" } @endcode
+ *
+ * Response JSON: @code { "ok":true, "state":"running|idle" } @endcode
+ *
+ * @param req  Incoming HTTP POST request.
+ * @return ESP_OK.
+ */
+static esp_err_t handle_replay_control(httpd_req_t *req)
+{
+    char body[128];
+    if (read_body(req, body, sizeof(body)) != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Read error");
+        return ESP_OK;
+    }
+    cJSON *root = cJSON_Parse(body);
+    if (!root) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "JSON parse error");
+        return ESP_OK;
+    }
+
+    cJSON *j_action = cJSON_GetObjectItem(root, "action");
+    if (cJSON_IsString(j_action)) {
+        if (strcmp(j_action->valuestring, "start") == 0) {
+            replay_task_start();
+            Serial.println("[web/replay] Start requested");
+        } else if (strcmp(j_action->valuestring, "stop") == 0) {
+            replay_task_stop();
+            Serial.println("[web/replay] Stop requested");
+        }
+    }
+    cJSON_Delete(root);
+
+    replay_state_t rs = replay_task_get_state();
+    const char *rs_str = (rs == REPLAY_RUNNING) ? "running" : "idle";
+
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddBoolToObject(resp,   "ok",    1);
+    cJSON_AddStringToObject(resp, "state", rs_str);
+    char *resp_str = cJSON_PrintUnformatted(resp);
+    cJSON_Delete(resp);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, resp_str ? resp_str : "{\"ok\":true}");
+    free(resp_str);
     return ESP_OK;
 }
 
@@ -963,11 +1087,11 @@ void web_server_init(void)
     };
     const httpd_uri_t u_replay_up = {
         .uri = "/replay/upload", .method = HTTP_POST,
-        .handler = handle_not_implemented
+        .handler = handle_replay_upload
     };
     const httpd_uri_t u_replay_ctrl = {
         .uri = "/replay/control", .method = HTTP_POST,
-        .handler = handle_not_implemented
+        .handler = handle_replay_control
     };
     const httpd_uri_t u_log_clear = {
         .uri = "/log/clear", .method = HTTP_POST,

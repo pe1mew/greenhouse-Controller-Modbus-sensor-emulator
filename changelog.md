@@ -6,6 +6,74 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ---
 
+## [0.11.0] — 2026-05-04  Phase 11 — Replay Mode
+
+### Added — firmware (`firmware/sensorEmulator/`)
+- `util/csv_parser.h` / `util/csv_parser.cpp` — SPIFFS CSV reader.
+  `csv_open(path)` parses the header row and maps column names to a `CsvField`
+  enum (`COL_TIMESTAMP`, `COL_FG_TEMP`, `COL_FG_HUM`, `COL_S200_SPD`,
+  `COL_S200_DIR`, `COL_S200_HEAT`).  `csv_next_row()` returns a `csv_row_t`
+  with per-field presence booleans; timestamps parsed with
+  `strptime("%Y-%m-%dT%H:%M:%S", ...)` (local time, no Z suffix).
+  `CSV_MAX_LINE = 160`.  Heap-allocated via `new`/`delete`; single instance.
+- `tasks/replay_task.h` / `tasks/replay_task.cpp` — FreeRTOS task
+  (`tskIDLE_PRIORITY+1`, 4 KiB stack).  State machine: IDLE → RUNNING →
+  DONE/ERROR.  Public API: `replay_task_init()`, `replay_task_start()`,
+  `replay_task_stop()`, `replay_task_get_state()`, `replay_task_get_row()`.
+  Wakeup via two volatile booleans (`s_start_req`, `s_stop_req`) plus
+  `xTaskNotifyGive`.  RTC pre-flight check (epoch > 2020-01-01).  On start:
+  opens CSV, seeks to first row with `mktime(&row.ts) >= now`.  Main loop:
+  polls at 500 ms with `ulTaskNotifyTake`; injects row when timestamp is due
+  via `inject_row()`.  `inject_row()` uses `to_raw()` to clamp each field to
+  its physical range and prints serial warnings for out-of-range values; only
+  injects into sensors currently in `SENSOR_MODE_REPLAY`.  On EOF: DONE state.
+
+### Changed — firmware (`firmware/sensorEmulator/`)
+- `web/web_server.cpp`:
+  - `handle_replay_upload()` replaces the Phase 7 `501` stub.  Stops any
+    running replay, removes the old SPIFFS file, streams the raw POST body in
+    256-byte chunks (max `REPLAY_MAX_UPLOAD_BYTES = 200 × 1024`), stores the
+    path in NVS key `replay_file`, returns `{"ok":true,"size":N}`.
+  - `handle_replay_control()` replaces the Phase 7 `501` stub.  Parses
+    `{"action":"start"|"stop"}`, calls `replay_task_start()` or
+    `replay_task_stop()`, returns `{"ok":true,"state":"running"|"idle"}`.
+  - `build_status_json()` extended with a `"replay"` object:
+    `{"state":"idle"|"running"|"done"|"error", "row": N}`.
+- `main.cpp` — `replay_task_init()` called after `live_fetch_task_init()`;
+  boot banner updated to "Phase 11 Replay Mode".
+
+### Added — web assets (`firmware/data/`)
+- `data/index.html` — Replay CSV section added to System Settings (before Manual
+  Time): file picker, Upload button with `replay-upload-status` hint, Start/Stop
+  buttons, `replay-status` hint paragraph, CSV format reference block.
+  `<em>(Phase 11)</em>` placeholder removed from both sensor mode radio labels.
+- `data/app.js` — `uploadReplayFile()`: raw POST to `/replay/upload` with
+  `Content-Type: text/csv`; shows byte count on success.  `startReplay()` /
+  `stopReplay()`: thin wrappers around `post('/replay/control', ...)`.
+  `handleStatus()` extended: reads `s.replay.state` and `s.replay.row`,
+  writes human-readable text to `#replay-status` (`"Replay: Running — row N"`).
+
+### Build metrics
+- RAM: 15.3% (50 248 / 327 680 B)
+- Flash: 83.6% (1 096 045 / 1 310 720 B)
+
+---
+
+## [0.10.1] — 2026-05-04  S200 heating temperature follows live ambient
+
+### Changed — firmware (`firmware/sensorEmulator/`)
+- `tasks/live_fetch_task.cpp` — `fetch_and_inject()` now derives
+  `s200_heat_raw` from the fetched ambient temperature (`temp_c * 1000`,
+  clamped to `[S200_HEAT_RAW_MIN, S200_HEAT_RAW_MAX]`) and injects it into
+  `g_sensor_state.s200_heat_high` / `s200_heat_low` when S200 is in LIVE mode.
+  Serial log extended with `heat=xx.xxx°C` field.
+
+### Verified
+- Firmware flashed to hardware (COM5).  In Live mode the S200 heating
+  temperature display in the web UI tracks the Open-Meteo ambient temperature.
+
+---
+
 ## [0.10.0] — 2026-05-04  Phase 10 — Live Mode
 
 ### Added — firmware (`firmware/sensorEmulator/`)

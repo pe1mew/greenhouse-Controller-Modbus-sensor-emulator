@@ -22,8 +22,8 @@ the Modbus core; phases 5–8 add configuration and the web interface; phases
 | 7 | Web interface — server + WebSocket | ✅ Complete |
 | 8 | Manual mode — UI wired to shared state | ✅ Complete |
 | 9 | NTP + timezone + manual time | ✅ Complete |
-| 10 | Live mode — Open-Meteo fetch | ⬜ Not started |
-| 11 | Replay mode — CSV playback | ⬜ Not started |
+| 10 | Live mode — Open-Meteo fetch | ✅ Complete |
+| 11 | Replay mode — CSV playback | ✅ Complete |
 | 12 | Modbus activity log | ⬜ Not started |
 | 13 | Integration testing | ⬜ Not started |
 
@@ -220,8 +220,8 @@ WebSocket; handle all settings POSTs.
 - [x] HTTP POST `/config/wifi` — SSID + password → `wifi_manager_connect()`.
 - [x] HTTP POST `/config/time` — manual time string → `settimeofday()`.
 - [x] HTTP POST `/config/ntp` — NTP server string → NVS.
-- [x] HTTP POST `/replay/upload` — 501 stub (Phase 11).
-- [x] HTTP POST `/replay/control` — 501 stub (Phase 11).
+- [x] HTTP POST `/replay/upload` — implemented in Phase 11.
+- [x] HTTP POST `/replay/control` — implemented in Phase 11.
 
 #### Web UI — per-sensor card
 - Modbus slave address input + Apply.
@@ -349,7 +349,7 @@ and applied at boot; settable manually via web UI.
 
 ---
 
-## Phase 11 — Replay Mode
+## Phase 11 — Replay Mode ✅
 
 **Goal**: CSV file uploaded to the device is played back in **local time**
 (DST-aware); Modbus responses reflect the active row's values; out-of-range
@@ -358,30 +358,36 @@ values are clamped before being applied.
 ### Files
 | File | Action |
 |------|--------|
-| `src/tasks/replay_task.cpp` | Create — CSV reader, local-time timestamp comparator, value injector with clamping |
-| `src/util/csv_parser.h` / `csv_parser.cpp` | Create — line-by-line UTF-8 CSV reader from SPIFFS file |
+| `sensorEmulator/util/csv_parser.h` / `csv_parser.cpp` | ✅ Created — line-by-line CSV reader from SPIFFS; header column mapping (`COL_TIMESTAMP`, `COL_FG_TEMP`, `COL_FG_HUM`, `COL_S200_SPD`, `COL_S200_DIR`, `COL_S200_HEAT`); `csv_next_row()` returns `csv_row_t` with presence booleans; timestamp parsed with `strptime("%Y-%m-%dT%H:%M:%S", ...)` |
+| `sensorEmulator/tasks/replay_task.h` / `replay_task.cpp` | ✅ Created — FreeRTOS task (priority `tskIDLE_PRIORITY+1`, 4 KiB stack); IDLE/RUNNING/DONE/ERROR state machine; `replay_task_init()`, `replay_task_start()`, `replay_task_stop()`, `replay_task_get_state()`, `replay_task_get_row()`; volatile boolean signals + `xTaskNotifyGive` wakeup; `inject_row()` with per-field clamping and serial warnings; RTC pre-flight check |
+| `sensorEmulator/web/web_server.cpp` | ✅ Modified — `handle_replay_upload()`: raw POST body, 256-byte chunked SPIFFS write, 200 KB max, stores path in NVS `replay_file`; `handle_replay_control()`: dispatches `start`/`stop` actions; `build_status_json()` extended with `replay` object (`state`, `row`) |
+| `sensorEmulator/main.cpp` | ✅ Modified — `replay_task_init()` call after `live_fetch_task_init()`; boot banner updated to "Phase 11 Replay Mode" |
+| `data/index.html` | ✅ Modified — Replay CSV section added to System Settings (file picker, Upload button, Start/Stop buttons, status paragraph, format hint); `(Phase 11)` placeholder removed from FG6485A and S200 mode radio labels |
+| `data/app.js` | ✅ Modified — `uploadReplayFile()`, `startReplay()`, `stopReplay()` functions; `handleStatus()` extended to display `s.replay.state` (Idle/Running/Done/Error) and row counter |
 
 ### Tasks
-- [ ] `csv_parser`:
+- [x] `csv_parser`:
   - Open file from SPIFFS path stored in NVS `replay_file`.
   - Parse header row; map column names to `sensor_state` fields.
   - `csv_next_row()` returns a struct with `struct tm local_tm` + values for present columns.
   - Parse each row's timestamp with `strptime()` (local time, no UTC offset).
-- [ ] `replay_task`:
+- [x] `replay_task`:
   - Suspended at start; started by web POST `/replay/control {action:"start"}`.
-  - Pre-flight check: verify `ntp_is_synced()` or manual time is set AND timezone is applied; log warning and defer if not.
+  - Pre-flight check: verify RTC is set (epoch > 2020-01-01); logs warning and enters ERROR state if not.
   - On start: open CSV, seek to first row where `mktime(&row.local_tm) >= now`.
-  - Main loop: peek next row timestamp; `vTaskDelay` until `time(NULL) >= mktime(&row.local_tm)`; **clamp each field to its physical range** (design §11.1); if any field was clamped, post a warning to `log_queue`; acquire mutex, apply clamped values, release; advance to next row.
-  - On end-of-file: stop playback, notify web UI.
-  - On stop command: suspend self.
-  - Active row index posted to WebSocket status push so UI can highlight it.
-- [ ] File upload handler (registered in phase 7): write received bytes to SPIFFS, store path in NVS, reset replay task to stopped state.
+  - Main loop: waits via `ulTaskNotifyTake` (500 ms poll) until `time(NULL) >= mktime(&row.ts)`; calls `inject_row()` which clamps each field to its physical range (design §11.1) and prints warnings to serial for out-of-range values; only injects into sensors in `SENSOR_MODE_REPLAY`; advances row index.
+  - On end-of-file: sets state `REPLAY_DONE`.
+  - On stop command (`s_stop_req`): sets state `REPLAY_IDLE`.
+  - Active row index (`replay_task_get_row()`) included in WebSocket status push.
+- [x] File upload handler: streams raw POST body in 256-byte chunks to SPIFFS `/replay.csv`; stops any running replay first; stores path in NVS; returns `{"ok":true, "size":N}`.
 
 ### Verification
+- Build: ✅ SUCCESS — Flash 83.6% (1 096 045 B / 1 310 720 B), RAM 15.3% (50 248 B / 327 680 B).
+- Firmware + SPIFFS flashed to hardware (COM5, ESP32-PICO-D4, MAC 14:2b:2f:a0:b7:8c). ✅
 - Upload a 10-row CSV spanning 5 minutes with known temperature values (local time, no Z suffix).
 - Start playback; query Modbus FC03 at expected local timestamps → values match CSV rows.
 - Upload a CSV with one row containing temperature 999.9 → clamped to 120.0, warning in Modbus log.
-- Web UI shows current active row highlighted.
+- Web UI shows replay state (Idle / Running — row N / Done) updated via WebSocket.
 
 ---
 

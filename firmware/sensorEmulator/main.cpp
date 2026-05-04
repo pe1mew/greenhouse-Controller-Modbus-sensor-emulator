@@ -1,6 +1,6 @@
 /**
  * @file main.cpp
- * @brief Modbus Sensor Emulator — Phase 10: Live Mode.
+ * @brief Modbus Sensor Emulator — Phase 11: Replay Mode.
  *
  * Adds the live-fetch task which periodically queries Open-Meteo for current
  * weather (temperature, humidity, wind speed, wind direction) and injects the
@@ -64,6 +64,7 @@
 #include "tasks/s200_mode_task.h"
 #include "tasks/ntp_task.h"
 #include "tasks/live_fetch_task.h"
+#include "tasks/replay_task.h"
 
 // ---------------------------------------------------------------------------
 // Arduino entry points
@@ -88,7 +89,7 @@ void setup()
 
     Serial.println();
     Serial.println("================================================");
-    Serial.println("  Modbus Sensor Emulator — Phase 10 Live Mode");
+    Serial.println("  Modbus Sensor Emulator — Phase 11 Replay Mode");
     Serial.println("  M5Stack Atom Lite + Atomic RS485 Base");
     Serial.println("  9600 baud 8N1  |  LED G27  |  RX G22  TX G19");
     Serial.println("================================================");
@@ -125,6 +126,10 @@ void setup()
     // Start Open-Meteo live-fetch task (Phase 10).
     // Starts blocked; wakes when a sensor is set to LIVE mode.
     live_fetch_task_init();
+
+    // Start CSV replay task (Phase 11).
+    // Starts idle; begins playback on POST /replay/control {action:"start"}.
+    replay_task_init();
 
     // Start mode dispatcher tasks (Phase 8).
     // Low priority — yield to Modbus slave and WiFi tasks at all times.

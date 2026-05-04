@@ -71,7 +71,7 @@
     <label>Mode</label>
     <label class="radio"><input type="radio" name="fg-mode" value="0" checked onchange="postFgMode(this.value)"> Manual</label>
     <label class="radio"><input type="radio" name="fg-mode" value="1" onchange="postFgMode(this.value)"> Live</label>
-    <label class="radio"><input type="radio" name="fg-mode" value="2" onchange="postFgMode(this.value)"> Replay <em>(Phase 11)</em></label>
+    <label class="radio"><input type="radio" name="fg-mode" value="2" onchange="postFgMode(this.value)"> Replay</label>
   </div>
 
   <div id="fg-manual">
@@ -103,7 +103,7 @@
     <label>Mode</label>
     <label class="radio"><input type="radio" name="s200-mode" value="0" checked onchange="postS200Mode(this.value)"> Manual</label>
     <label class="radio"><input type="radio" name="s200-mode" value="1" onchange="postS200Mode(this.value)"> Live</label>
-    <label class="radio"><input type="radio" name="s200-mode" value="2" onchange="postS200Mode(this.value)"> Replay <em>(Phase 11)</em></label>
+    <label class="radio"><input type="radio" name="s200-mode" value="2" onchange="postS200Mode(this.value)"> Replay</label>
   </div>
 
   <div id="s200-manual">
@@ -172,6 +172,23 @@
   </div>
   <button onclick="postLocation()">Apply location</button>
   <p class="hint">Used for Live mode weather fetch. Auto-detected via IP geolocation on WiFi connect, or set manually.</p>
+
+  <hr>
+  <h3>Replay CSV</h3>
+  <div class="row">
+    <label>CSV file</label>
+    <input type="file" id="replay-file" accept=".csv,.txt">
+  </div>
+  <button onclick="uploadReplayFile()">Upload</button>
+  <p id="replay-upload-status" class="hint"></p>
+
+  <div class="row" style="margin-top:.75rem">
+    <button onclick="startReplay()">&#9654; Start replay</button>
+    <button onclick="stopReplay()" style="margin-left:.5rem">&#9632; Stop</button>
+  </div>
+  <p id="replay-status" class="hint"></p>
+  <p class="hint">CSV format: <code>timestamp,fg_temp,fg_hum,s200_spd,s200_dir,s200_heat</code><br>
+    Timestamp: <code>YYYY-MM-DDTHH:MM:SS</code> (local time, no Z). Sensor columns are optional.</p>
 
   <hr>
   <h3>Manual time</h3>

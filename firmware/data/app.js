@@ -137,6 +137,19 @@ function handleStatus(s) {
     (s.live && s.live.lon !== undefined) ? s.live.lon : null
   );
 
+  // Replay status.
+  if (s.replay) {
+    const stEl = document.getElementById('replay-status');
+    if (stEl) {
+      const stateMap = { idle: 'Idle', running: 'Running', done: 'Done (EOF)', error: 'Error' };
+      let txt = 'Replay: ' + (stateMap[s.replay.state] || s.replay.state);
+      if (s.replay.state === 'running' && s.replay.row >= 0) {
+        txt += '  —  row ' + s.replay.row;
+      }
+      stEl.textContent = txt;
+    }
+  }
+
   // On first message: sync all editable controls to the device's current state.
   if (!wsInitialized) {
     wsInitialized = true;
@@ -305,6 +318,36 @@ function postLocation() {
     if (r.lat !== undefined) document.getElementById('live-lat').value = r.lat.toFixed(4);
     if (r.lon !== undefined) document.getElementById('live-lon').value = r.lon.toFixed(4);
   });
+}
+
+// ── Replay ───────────────────────────────────────────────────────────────
+function uploadReplayFile() {
+  const input    = document.getElementById('replay-file');
+  const statusEl = document.getElementById('replay-upload-status');
+  if (!input || !input.files || !input.files[0]) {
+    if (statusEl) statusEl.textContent = 'No file selected.';
+    return;
+  }
+  const file = input.files[0];
+  if (statusEl) statusEl.textContent = 'Uploading…';
+  fetch('/replay/upload', {
+    method:  'POST',
+    headers: { 'Content-Type': 'text/csv' },
+    body:    file,
+  }).then(r => r.ok ? r.json() : null)
+    .then(r => {
+      if (statusEl) statusEl.textContent =
+        r ? ('Uploaded ' + r.size + ' bytes.') : 'Upload failed.';
+    })
+    .catch(() => { if (statusEl) statusEl.textContent = 'Upload error.'; });
+}
+
+function startReplay() {
+  post('/replay/control', { action: 'start' });
+}
+
+function stopReplay() {
+  post('/replay/control', { action: 'stop' });
 }
 
 // ── Modbus log ───────────────────────────────────────────────────────────

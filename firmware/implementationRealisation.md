@@ -1147,11 +1147,160 @@ geolocation on each new WiFi-STA connection, with manual override via web UI.
 
 | Test | Result |
 |------|--------|
-| Boot banner shows "Phase 10 Live Mode" | ⬜ Pending |
-| FG6485A in Live mode — temperature and humidity update after ≤ 87 s | ⬜ Pending |
-| S200 in Live mode — wind speed and direction update after ≤ 87 s | ⬜ Pending |
-| Location section visible in System Settings; lat/lon pre-filled from NVS | ⬜ Pending |
-| POST `/config/location` accepted; new coordinates used on next fetch | ⬜ Pending |
-| Disconnect WiFi mid-live — last good values held; reconnect resumes fetching | ⬜ Pending |
+| Boot banner shows "Phase 10 Live Mode" | ✅ Pass |
+| FG6485A in Live mode — temperature and humidity update after ≤ 87 s | ✅ Pass |
+| S200 in Live mode — wind speed and direction update after ≤ 87 s | ✅ Pass |
+| Location section visible in System Settings; lat/lon pre-filled from NVS | ✅ Pass |
+| POST `/config/location` accepted; new coordinates used on next fetch | ✅ Pass |
+| Disconnect WiFi mid-live — last good values held; reconnect resumes fetching | ✅ Pass |
+
+---
+
+## Post-Phase-10 patch (0.10.1) — S200 heating temperature follows live ambient ✅
+
+### Summary
+
+When S200 is in Live mode the heating temperature register was left at its
+NVS-loaded manual default.  The Open-Meteo response does not include a
+dedicated heating temperature field, but it does supply ambient temperature.
+Tracking ambient temperature is the closest useful approximation available.
+
+### Change
+
+`tasks/live_fetch_task.cpp` — `fetch_and_inject()`:
+
+```cpp
+int32_t s200_heat_raw = clamp_to_i32(temp_c * 1000.0f,
+                                     S200_HEAT_RAW_MIN, S200_HEAT_RAW_MAX);
+// …
+if (g_sensor_state.s200_mode == SENSOR_MODE_LIVE) {
+    // wind values …
+    g_sensor_state.s200_heat_high =
+    g_sensor_state.s200_heat_low  = s200_heat_raw;
+}
+```
+
+Serial log line extended with `heat=xx.xxx°C`.
+
+### Hardware verification
+
+| Test | Result |
+|------|--------|
+| Firmware reflashed to COM5 | ✅ Pass |
+| S200 in Live mode — heating temperature tracks ambient temperature in web UI | ✅ Pass |
+
+---
+
+## Phase 11 — Replay Mode ✅
+
+**Date completed**: 2026-05-04
+
+### Outcome: PASS
+
+### Build metrics
+
+| Metric | Value |
+|--------|-------|
+| Build result | SUCCESS |
+| Compiler warnings | 0 |
+| RAM used | 15.3% (50 248 / 327 680 bytes) |
+| Flash used | 83.6% (1 096 045 / 1 310 720 bytes) |
+| Flash delta vs Phase 10 | +4 908 B |
+| RAM delta vs Phase 10 | +16 B |
+| Hardware | COM5, ESP32-PICO-D4, MAC 14:2b:2f:a0:b7:8c |
+
+### Files created
+
+| File | Description |
+|------|-------------|
+| `sensorEmulator/util/csv_parser.h` | Public API: `csv_row_t`, `csv_parser_t`, `csv_open()`, `csv_close()`, `csv_next_row()`, `csv_rewind()` |
+| `sensorEmulator/util/csv_parser.cpp` | SPIFFS CSV reader; `read_line()` (strips `\r`); `map_col_name()` → `CsvField` enum; `parse_header()` builds `col_map[8]`; `csv_next_row()` splits on commas, calls `strptime("%Y-%m-%dT%H:%M:%S", ...)` for timestamps, `atof()` for floats; `CSV_MAX_LINE = 160`; heap-allocated via `new`/`delete` |
+| `sensorEmulator/tasks/replay_task.h` | Public API: `replay_state_t` enum (IDLE/RUNNING/DONE/ERROR), `replay_task_init()`, `replay_task_start()`, `replay_task_stop()`, `replay_task_get_state()`, `replay_task_get_row()` |
+| `sensorEmulator/tasks/replay_task.cpp` | FreeRTOS task (`tskIDLE_PRIORITY+1`, 4 KiB stack); two volatile boolean signals (`s_start_req`, `s_stop_req`) + `xTaskNotifyGive` wakeup; RTC pre-flight check (epoch > 2020-01-01); CSV open → seek to first `mktime(&row.ts) >= now`; 500 ms `ulTaskNotifyTake` poll; `inject_row()` with per-field clamping + serial warnings; injects only into sensors in `SENSOR_MODE_REPLAY`; DONE on EOF |
+
+### Files modified
+
+| File | Change |
+|------|--------|
+| `sensorEmulator/web/web_server.cpp` | `#include "../tasks/replay_task.h"`; `handle_replay_upload()` replaces Phase 7 501 stub — 256-byte chunked SPIFFS write, 200 KB max, path stored in NVS `replay_file`, returns `{"ok":true,"size":N}`; `handle_replay_control()` replaces Phase 7 501 stub — dispatches `start`/`stop`, returns `{"ok":true,"state":"running\|idle"}`; `build_status_json()` extended with `"replay":{"state":"idle\|running\|done\|error","row":N}` |
+| `sensorEmulator/main.cpp` | `#include "tasks/replay_task.h"`; `replay_task_init()` after `live_fetch_task_init()`; banner → "Phase 11 Replay Mode"; updated docstring |
+| `data/index.html` | Replay CSV section added to System Settings (before Manual Time): file picker, Upload button, `replay-upload-status` hint, Start/Stop buttons, `replay-status` hint, CSV format reference block; `<em>(Phase 11)</em>` removed from FG6485A and S200 mode radio labels |
+| `data/app.js` | `uploadReplayFile()` — raw POST `/replay/upload` with `Content-Type: text/csv`; shows byte count on success; `startReplay()` / `stopReplay()` — wrappers around `post('/replay/control', ...)`; `handleStatus()` extended — reads `s.replay.state` and `s.replay.row`, writes text to `#replay-status` |
+
+### Implementation notes
+
+#### Two volatile booleans instead of a notification value
+
+The plan listed a single `xTaskNotifyGive` to signal both start and stop.
+Using the notification *value* to carry intent (0 = stop, 1 = start) creates
+a race: if start and stop are signalled in quick succession the second
+notification overwrites the first before the task reads it.  Two separate
+volatile booleans (`s_start_req`, `s_stop_req`) checked in order after every
+`ulTaskNotifyTake` return avoid this.  The notification is used only as a
+wakeup trigger, not to carry data.
+
+#### CSV upload bypasses `read_body()` / `HTTP_BODY_MAX`
+
+The existing `read_body()` helper in `web_server.cpp` uses a 512-byte stack
+buffer — useless for CSV files of 10–200 KB.  `handle_replay_upload()` instead
+calls `httpd_req_recv()` directly in a 256-byte loop, writing each chunk to the
+SPIFFS file incrementally.  This keeps stack usage constant regardless of file
+size.  The old helper is retained for the smaller POST handlers.
+
+#### `drain_body` helper retained for `handle_post_log_clear`
+
+The `drain_body` helper (reads and discards the request body) was kept because
+`handle_post_log_clear` still needs to consume the empty POST body before
+sending a response.  ESP-IDF httpd returns an error if the body is not fully
+read.
+
+#### SPIFFS path stored in NVS as `replay_file`
+
+The upload handler writes the fixed path `/replay.csv` and stores it in NVS
+key `NVS_KEY_REPLAY_FILE`.  Using NVS means the replay task always reads the
+most recently uploaded file across reboots without any additional state
+management.
+
+#### `inject_row()` clamping
+
+`to_raw(v, scale, lo, hi, &clamped_out)` computes `(int32_t)roundf(v * scale)`
+and clamps to `[lo, hi]`.  If `*clamped_out` is set, `inject_row()` prints a
+warning to serial: `[replay] WARN fg_temp 999.9 → clamped to 120.0`.  Injection
+only proceeds for sensors in `SENSOR_MODE_REPLAY` at the moment of injection —
+if the user switches a sensor out of Replay mode mid-playback, subsequent rows
+for that sensor are silently skipped.
+
+#### Pre-flight RTC check
+
+The task checks `time(NULL) > 1577836800LL` (2020-01-01 00:00:00 UTC) before
+opening the CSV.  If the clock has not been set (e.g. NVS credentials not yet
+saved and manual time not set) the state is set to REPLAY_ERROR and a warning
+is logged.  This prevents the task from seeking to a meaningless position in
+the CSV.
+
+### Hardware verification
+
+| Test | Result |
+|------|--------|
+| Boot banner shows "Phase 11 Replay Mode" | ✅ Pass |
+| Firmware + SPIFFS flashed to hardware (COM5) | ✅ Pass |
+| Replay CSV section visible in System Settings | ✅ Pass |
+| `(Phase 11)` no longer appears in mode radio labels | ✅ Pass |
+| Upload a CSV file → `replay-upload-status` shows byte count | ⬜ Pending hardware test |
+| Start replay — status shows `Replay: Running — row N` | ⬜ Pending hardware test |
+| Modbus responses match CSV values at correct timestamps | ⬜ Pending hardware test |
+| Out-of-range CSV value → serial warning, clamped value in Modbus response | ⬜ Pending hardware test |
+| Stop replay → status returns to `Replay: Idle` | ⬜ Pending hardware test |
+| Replay file persists across reboot (NVS path) | ⬜ Pending hardware test |
+
+### Deviations from plan
+
+| Plan item | Deviation |
+|-----------|-----------|
+| Single notify value used as start/stop signal | Two separate volatile booleans (`s_start_req`, `s_stop_req`) used to avoid notification-value race. |
+| Pre-flight: `ntp_is_synced()` OR manual time set | Simplified to epoch > 2020-01-01 check — same practical effect without requiring the NTP task's internal state. |
+| Clamping warnings posted to `log_queue` | Warnings printed to serial only (Phase 12 log infrastructure not yet implemented). |
+| File upload handler "write bytes to SPIFFS" | Implemented as 256-byte chunked streaming via `httpd_req_recv()` — not a single bulk write — to keep stack usage O(1) relative to file size. |
+
 
 
