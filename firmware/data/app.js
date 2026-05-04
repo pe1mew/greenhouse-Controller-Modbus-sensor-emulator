@@ -351,7 +351,7 @@ function stopReplay() {
 }
 
 // ── Modbus log ───────────────────────────────────────────────────────────
-const LOG_MAX = 200;
+const LOG_MAX = 30;
 
 function appendLog(entry) {
   const tbody = document.getElementById('log-body');

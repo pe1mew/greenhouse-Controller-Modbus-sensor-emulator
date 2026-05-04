@@ -1306,35 +1306,62 @@ the CSV.
 
 ## Phase 12 — Modbus Activity Log ✅
 
-**Firmware version**: 0.12.0  
+**Firmware version**: 0.12.1  
 **Flashed**: COM5 — ESP32-PICO-D4 MAC `14:2b:2f:a0:b7:8c`  
-**Build metrics**: Flash 83.7 % (1,097,573 / 1,310,720 B) · RAM 15.3 % (50,256 / 327,680 B)
+**Build metrics**: Flash 83.7 % (1,097,537 / 1,310,720 B) · RAM 15.3 % (50,256 / 327,680 B)
+
+### Design rationale
+
+The initial implementation stored raw frame bytes in `log_entry_t` (256 B per
+entry, queue depth 32, ≈ 10.5 KB heap) and formatted hex strings and
+timestamps inside `ws_push_task`.  This placed ~1.9 KB of locals on a 4 KB
+stack alongside `build_status_json` call frames, causing a stack overflow on
+the first log drain cycle.  The task crashed silently — Modbus kept working
+but the web UI froze.
+
+The implementation was redesigned to format at capture time:
+
+- `log_entry_t` holds pre-formatted strings only: `ts[20]`, `dir[3]`,
+  `hex[96]`, `summary[64]` — 183 bytes total.
+- `modbus_log_post()` runs in the slave task context and builds all strings
+  there; `ws_push_task` only copies them into cJSON.
+- Queue depth reduced to 8 (≈ 1.5 KB heap); at 9600 baud the master sends
+  ≤ 4 frame pairs/s so this never fills in a 1 s push cycle.
+- `WS_PUSH_STACK` remains 4096 B — no large locals in the push task.
+- `hex[96]` covers frames up to 32 bytes (32 × 3 − 1 = 95 chars + NUL);
+  real Modbus RTU frames at 9600 baud are 8–29 bytes.
+- GUI table capped at 30 rows; entries are stream-and-discard.
 
 ### Changes implemented
 
 | File | Change |
 |------|--------|
-| `sensorEmulator/modbus/modbus_log.h` | **New** — `log_dir_t`, `log_entry_t` (ts + dir + frame[256] + len + summary[64]), API: `modbus_log_init/post/receive/clear` |
-| `sensorEmulator/modbus/modbus_log.cpp` | **New** — FreeRTOS queue (depth 32); non-blocking `xQueueSend`; `build_summary()` decodes FC01–FC06, FC10, exception responses |
+| `sensorEmulator/modbus/modbus_log.h` | **New** — `log_dir_t`; `log_entry_t` with pre-formatted string fields (`ts[20]`, `dir[3]`, `hex[96]`, `summary[64]`); API: `modbus_log_init/post/receive/clear` |
+| `sensorEmulator/modbus/modbus_log.cpp` | **New** — FreeRTOS queue (depth 8); `modbus_log_post()` formats timestamp, hex string, and summary at capture time; non-blocking `xQueueSend`; `build_summary()` decodes FC01–FC06, FC10, exception responses |
 | `sensorEmulator/modbus/modbus_slave.cpp` | Added `#include "modbus_log.h"`; `modbus_log_post(LOG_DIR_RX, …)` after CRC-valid frame; `modbus_log_post(LOG_DIR_TX, …)` before `rs485_write` |
-| `sensorEmulator/web/web_server.cpp` | Added `#include "../modbus/modbus_log.h"`; new `broadcast_dyn_ctx_t` / `broadcast_dyn_cb()` / `ws_broadcast_dyn()` for heap-string WebSocket frames; `ws_push_task` drains log queue per cycle; `handle_post_log_clear` calls `modbus_log_clear()` |
+| `sensorEmulator/web/web_server.cpp` | Added `#include "../modbus/modbus_log.h"`; new `broadcast_dyn_ctx_t` / `broadcast_dyn_cb()` / `ws_broadcast_dyn()` for heap-string WebSocket frames; `ws_push_task` drain loop copies pre-formatted strings directly into cJSON (no large locals); `handle_post_log_clear` calls `modbus_log_clear()`; `WS_PUSH_STACK` = 4096 B |
 | `sensorEmulator/main.cpp` | `#include "modbus/modbus_log.h"`; `modbus_log_init()` after `sensor_state_init()`; banner → "Phase 12 Modbus Log" |
+| `data/app.js` | `LOG_MAX` 200 → 30 |
 
 ### Verification
 
 | Scenario | Result |
 |----------|--------|
-| Boot banner shows "Phase 12 Modbus Log" | ⬜ Pending hardware test |
-| FC03 request → RX entry appears in web UI log table | ⬜ Pending hardware test |
-| FC03 response → TX entry appears in web UI log table | ⬜ Pending hardware test |
-| Summary decodes correctly: `FC03 addr=1 reg=0x0000 n=2` | ⬜ Pending hardware test |
+| Boot banner shows "Phase 12 Modbus Log" | ✅ Confirmed |
+| FC03 request → RX entry appears in web UI log table | ✅ Confirmed |
+| FC03 response → TX entry appears in web UI log table | ✅ Confirmed |
+| Log updates continuously (no freeze after 2 min) | ✅ Confirmed — stack-overflow bug fixed |
+| Summary decodes correctly: `FC03 addr=1 reg=0x0000 n=2` | ✅ Confirmed |
 | Clear button → table empties; queue reset | ⬜ Pending hardware test |
-| Queue full (32 entries) → oldest entries dropped silently, no slave task blocking | ⬜ Pending hardware test |
+| Queue full (8 entries) → oldest entries dropped silently | ⬜ Pending hardware test |
 
 ### Deviations from plan
 
 | Plan item | Deviation |
 |-----------|-----------|
-| Log CRC-invalid frames too | Only CRC-valid frames (addressed to our slave addresses) are logged. Bad-CRC frames hit `continue` before `modbus_log_post` — serial still prints them via `log_frame()`. |
-| `ws_push_task` uses fixed `broadcast_ctx_t` | Added separate `broadcast_dyn_ctx_t` / `ws_broadcast_dyn()` for log frames to avoid truncation of long hex strings; status JSON path unchanged. |
+| `log_entry_t` stores raw frame bytes | Raw bytes replaced with pre-formatted strings; formatting moved to `modbus_log_post()` to eliminate large stack locals in `ws_push_task`. |
+| Queue depth 32 | Reduced to 8; throughput at 9600 baud never exceeds queue capacity within a 1 s push cycle. |
+| Log CRC-invalid frames | Only CRC-valid frames addressed to our slave are logged. Bad-CRC frames hit `continue` before `modbus_log_post` — serial still prints them. |
+| `ws_push_task` uses fixed `broadcast_ctx_t` | Added separate `broadcast_dyn_ctx_t` / `ws_broadcast_dyn()` for log frames; status JSON path unchanged. |
+| GUI table max 200 rows | Reduced to 30 — stream-and-discard model; no persistence needed. |
 

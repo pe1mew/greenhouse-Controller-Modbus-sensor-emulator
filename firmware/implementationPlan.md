@@ -24,7 +24,7 @@ the Modbus core; phases 5–8 add configuration and the web interface; phases
 | 9 | NTP + timezone + manual time | ✅ Complete |
 | 10 | Live mode — Open-Meteo fetch | ✅ Complete |
 | 11 | Replay mode — CSV playback | ✅ Complete |
-| 12 | Modbus activity log | ⬜ Not started |
+| 12 | Modbus activity log | ✅ Complete |
 | 13 | Integration testing | ⬜ Not started |
 
 ---
@@ -402,16 +402,21 @@ to the web UI in real time.
 | `src/modbus/modbus_log.h` / `modbus_log.cpp` | Create — `log_entry_t`, `log_queue` (size 32), `modbus_log_post()` |
 
 ### Tasks
-- [x] Define `log_entry_t { time_t ts; dir_t dir; uint8_t frame[256]; uint8_t len; char summary[64]; }`.
+- [x] Define `log_entry_t` with pre-formatted string fields: `ts[20]`, `dir[3]`, `hex[96]`, `summary[64]`.
+  - All formatting (timestamp, hex string, decoded summary) is done inside `modbus_log_post()` at capture time in the slave task, not in the push task.
 - [x] `modbus_slave_task` calls `modbus_log_post(RX, frame, len)` on every received frame (CRC-valid) and `modbus_log_post(TX, response, len)` on every transmitted response.
-- [x] `web_server_task` drains `log_queue` in its WebSocket push loop; formats each entry as JSON `{type:"log", ts, dir, hex, summary}` and pushes to all connected WebSocket clients via `ws_broadcast_dyn()`.
+- [x] `web_server_task` drains `log_queue` in its WebSocket push loop; copies pre-built strings directly into cJSON and pushes `{type:"log", ts, dir, hex, summary}` via `ws_broadcast_dyn()`.
 - [x] HTTP POST `/log/clear` → flushes `log_queue` and sends a `{type:"log_clear"}` WebSocket message.
 - [x] `summary` field: decode FC code and register range into human-readable string, e.g. `"FC03 addr=1 reg=0x0000 n=2"`.
+- [x] Queue depth 8 (sufficient for ≤ 4 frame pairs/s at 9600 baud with 1 s push interval); entries silently dropped when full.
+- [x] `WS_PUSH_STACK` = 4096 B — safe because no large buffers allocated in push task.
+- [x] GUI table capped at 30 rows; entries stream-and-discard (no persistent storage).
 
-**Build**: Flash 83.7% (1,097,573 B / 1,310,720 B) · RAM 15.3% (50,256 B / 327,680 B) · Flashed to COM5 ✅
+**Build**: Flash 83.7% (1,097,537 B / 1,310,720 B) · RAM 15.3% (50,256 B / 327,680 B) · Flashed to COM5 ✅
 
 ### Verification
-- [ ] Connect test client; execute several FC03 reads → web UI log table populates with matching entries.
+- [x] Connect test client; execute several FC03 reads → web UI log table populates with matching entries.
+- [x] Log updates continuously (stack-overflow bug fixed; no crash after 2 min).
 - [ ] Clear button → table empties.
 
 ---

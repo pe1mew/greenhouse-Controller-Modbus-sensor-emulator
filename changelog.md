@@ -6,18 +6,43 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ---
 
-## [0.12.0] — 2026-05-04  Phase 12 — Modbus Activity Log
+## [0.12.1] — 2026-05-04  Phase 12 — Modbus Log Redesign & Stack Fix
+
+### Changed — firmware (`firmware/sensorEmulator/`)
+- `modbus/modbus_log.h` / `modbus/modbus_log.cpp` — `log_entry_t` redesigned
+  from raw-bytes storage to pre-formatted strings (`ts[20]`, `dir[3]`,
+  `hex[96]`, `summary[64]`, 183 bytes total).  All formatting (timestamp,
+  hex string, decoded summary) is now done inside `modbus_log_post()` at
+  capture time in the slave task context.  Queue depth reduced from 32 to 8
+  (sufficient at 9600 baud; ≈ 1.5 KB heap vs ≈ 10.5 KB).
+- `web/web_server.cpp` — `ws_push_task` drain loop simplified: copies
+  pre-formatted strings directly into cJSON — no `hex_buf[769]`,
+  `ts_buf[32]`, or `localtime_r` call on the task stack.  `WS_PUSH_STACK`
+  reverted from 8192 B back to 4096 B.
+- `data/app.js` — `LOG_MAX` 200 → 30 (stream-and-discard, no persistence).
+
+### Fixed
+- `ws_push_task` stack overflow: `hex_buf[769]` + `entry` (337 B) +
+  `ts_buf[32]` + `build_status_json` call frame exceeded the 4096 B stack on
+  the first log drain cycle.  The task crashed silently — Modbus kept working
+  but the web UI froze within ~2 minutes.
+
+### Build metrics (after 0.12.1)
+- Flash: **83.7 %** (1,097,537 / 1,310,720 B)
+- RAM:   **15.3 %** (50,256 / 327,680 B)
+
+---
+
+## [0.12.0] — 2026-05-04  Phase 12 — Modbus Activity Log (initial)
 
 ### Added — firmware (`firmware/sensorEmulator/`)
 - `modbus/modbus_log.h` / `modbus/modbus_log.cpp` — FreeRTOS queue-based
-  Modbus activity log.  Queue depth 32 (`log_entry_t`, ≈ 330 bytes each
-  ≈ 10.5 KB RAM).  Public API: `modbus_log_init()`, `modbus_log_post()`,
+  Modbus activity log.  Public API: `modbus_log_init()`, `modbus_log_post()`,
   `modbus_log_receive()`, `modbus_log_clear()`.
   `modbus_log_post()` is always non-blocking (`xQueueSend` with zero timeout)
-  so it cannot stall the high-priority Modbus slave task; entries are silently
-  dropped when the queue is full.  `build_summary()` decodes FC01–FC06 and
-  FC10 (Write Multiple Registers) into human-readable strings
-  (`"FC03 addr=1 reg=0x0000 n=2"`); exception responses show
+  so it cannot stall the high-priority Modbus slave task.  `build_summary()`
+  decodes FC01–FC06 and FC10 (Write Multiple Registers) into human-readable
+  strings (`"FC03 addr=1 reg=0x0000 n=2"`); exception responses show
   `"FCxx EXCEPTION addr=n code=m"`.
 
 ### Changed — firmware (`firmware/sensorEmulator/`)
@@ -26,20 +51,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
   `modbus_log_post(LOG_DIR_TX, resp, len)` before every RS-485 transmission.
 - `web/web_server.cpp`:
   - Added `broadcast_dyn_ctx_t` / `broadcast_dyn_cb()` / `ws_broadcast_dyn()`
-    — dynamic-allocation broadcast path that owns a heap JSON string so that
-    log messages with up to 256-byte hex payloads (≈ 900 B JSON) are sent
-    without truncation.
-  - `ws_push_task` now drains `modbus_log_receive()` in a loop after each
-    status push; each entry is serialised as
-    `{type:"log", ts, dir:"RX"|"TX", hex:"AA BB …", summary:"…"}` and
-    broadcast via `ws_broadcast_dyn()`.
-  - `handle_post_log_clear` now calls `modbus_log_clear()` before broadcasting
-    `{type:"log_clear"}`, so the in-memory queue and browser table are cleared
-    atomically.
-- `main.cpp` — calls `modbus_log_init()` after `sensor_state_init()` and
-  before `modbus_slave_task` starts; boot banner updated to Phase 12.
+    — dynamic-allocation broadcast path that owns a heap JSON string.
+  - `ws_push_task` drains `modbus_log_receive()` after each status push.
+  - `handle_post_log_clear` calls `modbus_log_clear()` before broadcasting
+    `{type:"log_clear"}`.
+- `main.cpp` — calls `modbus_log_init()` after `sensor_state_init()`; boot
+  banner updated to Phase 12.
 
-### Build metrics (after Phase 12)
+### Build metrics (after 0.12.0)
 - Flash: **83.7 %** (1,097,573 / 1,310,720 B)
 - RAM:   **15.3 %** (50,256 / 327,680 B)
 

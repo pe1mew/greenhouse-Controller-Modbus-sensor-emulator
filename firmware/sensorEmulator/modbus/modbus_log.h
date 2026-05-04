@@ -12,7 +12,12 @@
  * - modbus_log_post() is called from the highest-priority FreeRTOS task
  *   (modbus_slave_task) and MUST NOT block.  xQueueSend() is called with
  *   a zero timeout; entries are silently dropped when the queue is full.
- * - Queue depth 32 at ~330 bytes per entry ≈ 10.5 KB RAM.
+ * - All formatting (timestamp, hex string, summary) is done at post time
+ *   inside modbus_log_post() so the push task only copies pre-built strings
+ *   into JSON — no large stack buffers required there.
+ * - Queue depth 8 at ~196 bytes per entry ≈ 1.6 KB RAM.
+ *   At 9600 baud the Modbus master polls at most 3–4 frame pairs per second;
+ *   with a 1 s push interval the queue is never more than ~8 entries deep.
  * - modbus_log_receive() is called from ws_push_task (priority 1) and
  *   may block on a non-zero wait tick.
  */
@@ -21,7 +26,6 @@
 
 #include <stdint.h>
 #include <stdbool.h>
-#include <time.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 
@@ -42,15 +46,18 @@ typedef enum {
 /**
  * @brief Single entry in the Modbus activity log.
  *
- * Sized for the largest legal Modbus ADU (256 bytes) plus a short
- * human-readable summary generated from the function code and register fields.
+ * All fields are pre-formatted strings, built inside modbus_log_post() at
+ * the moment the frame is captured.  The push task copies them directly into
+ * JSON without any additional formatting work or large intermediate buffers.
+ *
+ * Hex string capacity: 96 bytes covers frames up to 32 bytes
+ * (32 × 3 − 1 = 95 chars + NUL).  Real frames at 9600 baud are 8–29 bytes.
  */
 typedef struct {
-    time_t    ts;         /**< @brief Unix timestamp (seconds since epoch). */
-    log_dir_t dir;        /**< @brief RX or TX. */
-    uint8_t   frame[256]; /**< @brief Raw frame bytes. */
-    uint8_t   len;        /**< @brief Number of valid bytes in @c frame. */
-    char      summary[64];/**< @brief Human-readable decode, e.g. "FC03 addr=1 reg=0x0000 n=2". */
+    char ts[20];      /**< @brief "YYYY-MM-DD HH:MM:SS" or "" if clock not set. */
+    char dir[3];      /**< @brief "RX" or "TX". */
+    char hex[96];     /**< @brief Space-separated uppercase hex, e.g. "01 03 00 00 00 02 C4 0B". */
+    char summary[64]; /**< @brief Human-readable decode, e.g. "FC03 addr=1 reg=0x0000 n=2". */
 } log_entry_t;
 
 // ---------------------------------------------------------------------------

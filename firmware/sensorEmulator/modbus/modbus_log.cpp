@@ -12,6 +12,7 @@
 #include <Arduino.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
+#include <time.h>
 #include <cstring>
 #include <cstdio>
 
@@ -19,8 +20,13 @@
 // Constants
 // ---------------------------------------------------------------------------
 
-/** @brief Number of log entries the queue can hold before entries are dropped. */
-static constexpr int LOG_QUEUE_SIZE = 32;
+/**
+ * @brief Number of log entries the queue can hold before entries are dropped.
+ *
+ * At 9600 baud the master sends at most ~3 frame pairs per second.  With a
+ * 1 s push interval we never accumulate more than ~6–8 entries between drains.
+ */
+static constexpr int LOG_QUEUE_SIZE = 8;
 
 // ---------------------------------------------------------------------------
 // Module state
@@ -121,10 +127,32 @@ void modbus_log_post(log_dir_t dir, const uint8_t *frame, uint8_t len)
     log_entry_t entry;
     memset(&entry, 0, sizeof(entry));
 
-    entry.ts  = time(nullptr);
-    entry.dir = dir;
-    entry.len = len;
-    memcpy(entry.frame, frame, len);
+    // Format timestamp now, in the caller's context (high-prio slave task).
+    // This keeps the push task's stack free of large intermediate buffers.
+    time_t now = time(nullptr);
+    if (now > 1577836800LL) {   // > 2020-01-01 — clock is set
+        struct tm ti;
+        localtime_r(&now, &ti);
+        strftime(entry.ts, sizeof(entry.ts), "%Y-%m-%d %H:%M:%S", &ti);
+    }
+
+    // Direction string.
+    strncpy(entry.dir, (dir == LOG_DIR_TX) ? "TX" : "RX", sizeof(entry.dir) - 1);
+
+    // Pre-format hex string: "AA BB CC ..."
+    // Cap at the hex buffer capacity (96 bytes → up to 32 raw bytes).
+    uint8_t cap = len;
+    if ((size_t)(cap * 3) > sizeof(entry.hex)) {
+        cap = (uint8_t)((sizeof(entry.hex) - 1) / 3);
+    }
+    size_t pos = 0;
+    for (uint8_t i = 0; i < cap; i++) {
+        int w = snprintf(entry.hex + pos, sizeof(entry.hex) - pos,
+                         (i + 1 < cap) ? "%02X " : "%02X", frame[i]);
+        if (w > 0) pos += (size_t)w;
+    }
+
+    // Human-readable summary.
     build_summary(frame, len, entry.summary, sizeof(entry.summary));
 
     // Non-blocking: silently drop if the queue is full.

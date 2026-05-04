@@ -49,7 +49,7 @@
 /** @brief WebSocket push interval in milliseconds. */
 static constexpr size_t  WS_PUSH_INTERVAL_MS = 1000;
 /** @brief Stack size in bytes for the WS push task. */
-static constexpr size_t  WS_PUSH_STACK        = 8192;
+static constexpr size_t  WS_PUSH_STACK        = 4096;
 /** @brief Maximum HTTP request body size in bytes. */
 static constexpr size_t  HTTP_BODY_MAX         = 512;
 /** @brief Maximum size of a status JSON frame in bytes. */
@@ -1074,34 +1074,16 @@ static void ws_push_task(void * /*arg*/)
         ws_broadcast(json, strlen(json));
 
         // Drain all pending Modbus log entries and forward each as a WS frame.
+        // Entries are pre-formatted (ts, dir, hex, summary strings) by
+        // modbus_log_post() at capture time, so no large intermediate buffers
+        // are needed here.
         log_entry_t entry;
         while (modbus_log_receive(&entry, 0)) {
-            // Format timestamp (fallback to empty string if clock not set).
-            char ts_buf[32] = "";
-            if (entry.ts > 1577836800LL) {   // > 2020-01-01
-                struct tm tm_info;
-                localtime_r(&entry.ts, &tm_info);
-                strftime(ts_buf, sizeof(ts_buf), "%Y-%m-%d %H:%M:%S", &tm_info);
-            }
-
-            // Build hex string: "AA BB CC ..."
-            // Reserve 3 chars per byte ("XX ") plus NUL.
-            char hex_buf[256 * 3 + 1];
-            size_t hex_pos = 0;
-            for (uint8_t i = 0; i < entry.len; i++) {
-                int written = snprintf(hex_buf + hex_pos,
-                                       sizeof(hex_buf) - hex_pos,
-                                       (i + 1 < entry.len) ? "%02X " : "%02X",
-                                       entry.frame[i]);
-                if (written > 0) hex_pos += (size_t)written;
-            }
-
-            // Serialise as JSON and hand to the dynamic broadcast helper.
             cJSON *msg = cJSON_CreateObject();
             cJSON_AddStringToObject(msg, "type",    "log");
-            cJSON_AddStringToObject(msg, "ts",      ts_buf);
-            cJSON_AddStringToObject(msg, "dir",     entry.dir == LOG_DIR_RX ? "RX" : "TX");
-            cJSON_AddStringToObject(msg, "hex",     hex_buf);
+            cJSON_AddStringToObject(msg, "ts",      entry.ts);
+            cJSON_AddStringToObject(msg, "dir",     entry.dir);
+            cJSON_AddStringToObject(msg, "hex",     entry.hex);
             cJSON_AddStringToObject(msg, "summary", entry.summary);
             char *msg_str = cJSON_PrintUnformatted(msg);
             cJSON_Delete(msg);
