@@ -21,6 +21,7 @@ Each sensor has its own independent mode selection.
 ### 2.1 Manual
 - All register values are set directly by the user through the web interface.
 - Controls: slider or numeric input box — the slider value is always reflected in the input box. The value is only applied to the emulator after pressing **Apply**.
+- **Input validation**: before a value is applied or stored, it is clamped to the sensor's physical range (see §11). If the entered value is below the minimum it is set to the minimum; if above the maximum it is set to the maximum. The clamped value is shown back in the input box.
 - Values are stored in NVS so they survive a reboot.
 
 ### 2.2 Live *(internet required)*
@@ -41,9 +42,16 @@ Each sensor has its own independent mode selection.
 
 ### 2.3 Replay
 - The user uploads a UTF-8 `.csv` file to the device (via the web interface).
-- Format: `timestamp,sensor,field,value` — ISO-8601 timestamp column.
+- Format: `timestamp,fg_temperature,fg_humidity,...` — ISO-8601 timestamp column
+  (local time, with or without a UTC offset suffix).
 - A FreeRTOS task advances through the file and makes each value active at its
-  timestamp (device clock must be set).
+  timestamp.  Comparison is done in **local time** (timezone resolved from
+  `live_lat`/`live_lon` including DST — see §8.2), so the device clock must be
+  set and the timezone must be configured before playback starts.
+- **Input validation during replay**: each value read from a CSV row is clamped
+  to the sensor's physical range (see §11) before being written to
+  `sensor_state`.  Out-of-range rows are not skipped — the clamped value is
+  used and a warning is logged.
 - The active row is highlighted in the web interface.
 - The file is stored in SPIFFS/LittleFS; the filename is saved in NVS.
 
@@ -90,7 +98,8 @@ Pinout is identical to the existing test-client in
 │    Rate-limited by a 87-second FreeRTOS timer             │
 │                                                           │
 │  replay_task  (suspended when not in replay mode)         │
-│    Reads CSV from SPIFFS, advances by wall-clock time     │
+│    Reads CSV from SPIFFS, advances by local clock time    │
+│    (DST-aware — uses localtime_r() for row comparison)    │
 │                                                           │
 │  ntp_task                                                 │
 │    Syncs SNTP on WiFi connect; updates system clock       │
@@ -170,7 +179,7 @@ One card per sensor, identical layout:
 |---|---|
 | **Modbus slave address** input + **Apply** | Sets the slave address for this sensor (saved to NVS) |
 | Radio: Manual / Live / Replay | Selects active mode |
-| **Manual**: sliders + input boxes | Slider value is reflected in the input box; the value is only applied to the emulator after pressing **Apply**, which saves it to NVS |
+| **Manual**: sliders + input boxes | Slider value is reflected in the input box; the value is only applied to the emulator after pressing **Apply**, which saves it to NVS.  The slider range and numeric input limits are constrained to the sensor's physical range (§11); any out-of-range value is clamped before it is applied |
 | **Live**: location (lat/lon) input | Manual fallback location for Open-Meteo query; auto-resolved from public IP when internet is available (priority 1) |
 | **Replay**: file upload + start/stop | Upload CSV, start playback, show active row |
 
@@ -204,17 +213,49 @@ One card per sensor, identical layout:
 | `wifi_ssid` | str | "" |
 | `wifi_pass` | str | "" |
 | `ntp_server` | str | "pool.ntp.org" |
+| `tz_posix` | str | "" (auto-resolved from `live_lat`/`live_lon`) |
 
 ---
 
 ## 8. Time Management
 
+### 8.1 Clock source
+
 1. **NTP (priority 1)**: On WiFi STA connect, `sntp_setoperatingmode` /
    `sntp_setservername` / `sntp_init()` are called. The NTP server is
-   configurable in the web interface (default `pool.ntp.org`).
+   configurable in the web interface (default `pool.ntp.org`). NTP always
+   delivers **UTC**; the system clock is kept in UTC internally.
 2. **Manual (priority 2)**: Web interface POST sets the system time via
    `settimeofday()`. Used when no WiFi or NTP is unavailable.
-3. Current time is displayed in the web interface header (WebSocket push).
+
+### 8.2 Local time determination
+
+All internal timestamps are UTC. Local time (shown in the web interface and
+used as the reference clock for Replay mode) is derived at display / comparison
+time using the following approach:
+
+1. **Timezone resolution from location**: The device already stores
+   `live_lat` / `live_lon` in NVS (used by Live mode for the Open-Meteo
+   query). These coordinates are also used to resolve the IANA timezone
+   identifier (e.g. `Europe/Amsterdam`) for the device's physical location.
+2. **POSIX TZ string**: The resolved timezone is converted to a POSIX TZ
+   expression (e.g. `CET-1CEST,M3.5.0,M10.5.0/3`) and applied via
+   `setenv("TZ", tz_string, 1); tzset()`. The ESP-IDF `<time.h>` / `localtime_r()`
+   functions then handle all UTC-to-local conversion including **daylight
+   saving time (DST)** transitions automatically.
+3. **Fallback**: If the timezone cannot be resolved from the stored coordinates
+   (e.g. first boot with no internet), the system defaults to UTC
+   (`setenv("TZ", "UTC0", 1)`). The correct timezone is applied as soon as
+   coordinates are available.
+4. **Manual override**: The user can enter a POSIX TZ string directly in the
+   web interface WiFi/Time settings page; it is stored in NVS key `tz_posix`
+   and takes precedence over the auto-resolved value.
+
+### 8.3 Display
+
+Current local time (with DST-corrected offset) is displayed in the web
+interface header via WebSocket push (~1 s interval). An NTP-synced indicator
+is shown alongside the clock.
 
 ---
 
@@ -245,19 +286,56 @@ Boot
 
 ```
 timestamp,fg_temperature,fg_humidity,s200_speed_avg,s200_dir_avg
-2026-01-15T08:00:00Z,21.4,55.2,3.7,270
-2026-01-15T08:05:00Z,21.6,54.8,4.1,265
+2026-01-15T08:00:00,21.4,55.2,3.7,270
+2026-01-15T08:05:00,21.6,54.8,4.1,265
 ```
 
 - Header row is mandatory; columns are order-independent.
 - Columns not present in a row retain their previous value.
-- The replay task compares each row's timestamp to the current RTC clock and
-  activates the row when `now >= row_timestamp`.
+- Timestamps are **local time** (no UTC offset suffix required).  The replay
+  task parses each row's timestamp with `strptime()` and compares it to the
+  current local time obtained via `localtime_r()`.  This means DST transitions
+  are handled automatically: a row timestamped at `02:30:00` on a clock-change
+  night is activated at the correct local moment, not an hour early or late.
+- The device timezone (§8.2) must be configured and the clock must be set
+  (NTP or manual) before playback starts; otherwise the replay task logs a
+  warning and defers activation until the clock is valid.
 - A new upload replaces the existing file and resets playback to the first row.
 
 ---
 
-## 11. Sequence of Development
+## 11. Input Validation & Clamping
+
+All sensor value inputs — whether entered via the web interface (Manual mode)
+or read from a CSV file (Replay mode) — are validated against the physical
+range of the sensor.  Values outside the range are **clamped** to the nearest
+limit (minimum or maximum) before being applied to `sensor_state` or stored
+in NVS.
+
+### 11.1 Sensor value ranges
+
+| Sensor | Field | Physical min | Physical max | Raw encoding |
+|---|---|---|---|---|
+| FG6485A | Temperature | −40 °C | 120 °C | `int16_t` ×10 (−400 … 1200) |
+| FG6485A | Humidity | 0 %RH | 99.9 %RH | `uint16_t` ×10 (0 … 999) |
+| S200 | Wind speed (min/avg/max) | 0 m/s | 60 m/s | `int32_t` ×1000 (0 … 60 000) |
+| S200 | Wind direction (min/avg/max) | 0° | 360° | `int32_t` ×1000 (0 … 360 000) |
+| S200 | Heating temperature | −40 °C | 85 °C | `int32_t` ×1000 (−40 000 … 85 000) |
+
+### 11.2 Clamping rules
+
+- Clamping is applied **before** writing to `sensor_state` and **before** NVS commit.
+- The clamped value (not the original) is stored and served over Modbus.
+- In the web interface, the slider widget is bounded to [min, max]; the numeric
+  input box accepts free entry but the **Apply** POST handler clamps the value
+  server-side.  The WebSocket status push reflects the clamped value so the
+  UI always shows what is actually being emulated.
+- During CSV replay, each field is clamped independently.  A warning entry is
+  written to the Modbus log for every row that contained an out-of-range value.
+
+---
+
+## 12. Sequence of Development
 
 1. **Board bringup** — UART2 RS485 loopback, LED feedback (re-use test-client
    patterns from `documentation/code_modbusTestClient/`).
@@ -279,7 +357,7 @@ timestamp,fg_temperature,fg_humidity,s200_speed_avg,s200_dir_avg
 
 ---
 
-## 12. Reference Documentation
+## 13. Reference Documentation
 
 | Path | Content |
 |---|---|

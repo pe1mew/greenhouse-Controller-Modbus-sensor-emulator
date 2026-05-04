@@ -1,0 +1,165 @@
+/* ── Reset & variables ────────────────────────────────────────────── */
+:root {
+  --bg:     #1a1a2e;
+  --card:   #16213e;
+  --accent: #0f3460;
+  --fg:     #e0e0e0;
+  --muted:  #999;
+  --green:  #4caf50;
+  --red:    #f44336;
+  --yellow: #ff9800;
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: system-ui, sans-serif;
+  font-size: 14px;
+  background: var(--bg);
+  color: var(--fg);
+  padding: 1rem;
+  max-width: 900px;
+  margin: 0 auto;
+}
+
+/* ── Header ──────────────────────────────────────────────────────── */
+header {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin-bottom: 1.25rem;
+}
+header h1 { font-size: 1.2rem; }
+
+/* ── Sections ────────────────────────────────────────────────────── */
+section {
+  background: var(--card);
+  border-radius: 8px;
+  padding: 1rem;
+  margin-bottom: 1rem;
+}
+
+h2 {
+  font-size: 1rem;
+  margin-bottom: .75rem;
+  padding-bottom: .25rem;
+  border-bottom: 1px solid #2a2a4a;
+}
+h3 { font-size: .9rem; color: var(--muted); margin-bottom: .4rem; }
+
+/* ── Status grid ─────────────────────────────────────────────────── */
+.grid4 {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: .75rem;
+}
+.card {
+  background: var(--accent);
+  border-radius: 6px;
+  padding: .75rem;
+}
+.card p  { font-size: .85rem; margin-top: .25rem; }
+.card h3 { margin-bottom: .3rem; }
+
+/* ── Badges ──────────────────────────────────────────────────────── */
+.badge {
+  display: inline-block;
+  border-radius: 4px;
+  padding: 2px 8px;
+  font-size: .75rem;
+  font-weight: 700;
+  vertical-align: middle;
+}
+.badge.online  { background: var(--green); color: #fff; }
+.badge.offline { background: var(--red);   color: #fff; }
+.badge.ntp-on  { background: var(--green); color: #fff; }
+.badge.ntp-off { background: #444;         color: var(--muted); }
+
+/* ── Form rows ───────────────────────────────────────────────────── */
+.row {
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+  margin-bottom: .5rem;
+  flex-wrap: wrap;
+}
+.row > label:first-child {
+  min-width: 150px;
+  color: var(--muted);
+}
+.radio { font-size: .85rem; display: flex; align-items: center; gap: .2rem; }
+.radio em { color: var(--muted); font-size: .8rem; }
+
+/* ── Slider rows ─────────────────────────────────────────────────── */
+.slider-row {
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+  margin-bottom: .5rem;
+  flex-wrap: wrap;
+}
+.slider-row > label {
+  min-width: 170px;
+  color: var(--muted);
+}
+.slider-row input[type="range"] {
+  flex: 1;
+  min-width: 100px;
+  accent-color: var(--green);
+}
+
+/* ── Inputs ──────────────────────────────────────────────────────── */
+input[type="number"],
+input[type="text"],
+input[type="password"],
+input[type="datetime-local"] {
+  background: #0d1b2a;
+  color: var(--fg);
+  border: 1px solid #334;
+  border-radius: 4px;
+  padding: 4px 8px;
+  font-size: .85rem;
+}
+input.short { width: 86px; }
+input.wide  { flex: 1; min-width: 200px; }
+
+/* ── Buttons ─────────────────────────────────────────────────────── */
+button {
+  background: var(--accent);
+  color: var(--fg);
+  border: none;
+  border-radius: 4px;
+  padding: 6px 14px;
+  cursor: pointer;
+  font-size: .85rem;
+}
+button:hover { background: #1a5276; }
+button.btn-sm { padding: 3px 10px; font-size: .8rem; }
+
+/* ── Misc ────────────────────────────────────────────────────────── */
+hr { border: none; border-top: 1px solid #2a2a4a; margin: .75rem 0; }
+.hint { font-size: .8rem; color: var(--muted); margin-top: .4rem; }
+code { background: #0d1b2a; padding: 1px 4px; border-radius: 3px; }
+
+/* ── Modbus log ──────────────────────────────────────────────────── */
+#log-wrap {
+  max-height: 280px;
+  overflow-y: auto;
+  margin-top: .5rem;
+}
+#log-tbl {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: .75rem;
+}
+#log-tbl th, #log-tbl td {
+  border: 1px solid #2a2a4a;
+  padding: 3px 8px;
+  text-align: left;
+}
+#log-tbl th {
+  background: var(--accent);
+  position: sticky;
+  top: 0;
+}
+#log-tbl tr:nth-child(even) { background: rgba(255,255,255,.03); }

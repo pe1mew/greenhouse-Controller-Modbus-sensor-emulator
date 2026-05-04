@@ -210,6 +210,10 @@ void nvs_cfg_load_all(uint8_t *fg_addr_out, uint8_t *s200_addr_out)
     nvs_cfg_get_str(NVS_KEY_NTP_SERVER, ntp, sizeof(ntp), "pool.ntp.org");
     Serial.printf("[nvs] ntp     server=%s\n", ntp);
 
+    char tz[NVS_STR_MAX_TZ];
+    nvs_cfg_get_str(NVS_KEY_TZ_POSIX, tz, sizeof(tz), "");
+    Serial.printf("[nvs] tz       posix=%s\n", tz[0] ? tz : "(auto)");
+
     *fg_addr_out   = fg_addr;
     *s200_addr_out = s200_addr;
 }

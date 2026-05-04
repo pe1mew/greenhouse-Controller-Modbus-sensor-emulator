@@ -24,6 +24,7 @@
  * wifi_ssid         str     ""               STA network SSID   (Phase 6)
  * wifi_pass         str     ""               STA network password
  * ntp_server        str     "pool.ntp.org"   NTP server hostname (Phase 9)
+ * tz_posix          str     ""               POSIX TZ string (auto-resolved from lat/lon or manual override)
  */
 
 #pragma once
@@ -85,6 +86,15 @@
 /** @brief NVS key — NTP server hostname (@c str, default "pool.ntp.org"). */
 #define NVS_KEY_NTP_SERVER      "ntp_server"
 
+/**
+ * @brief NVS key — POSIX TZ string for local time determination (@c str, default "").
+ *
+ * Empty string means the timezone is auto-resolved from @c live_lat / @c live_lon
+ * coordinates at runtime (Phase 9).  A non-empty value takes precedence and is
+ * applied directly via @c setenv("TZ", ...) / @c tzset().
+ */
+#define NVS_KEY_TZ_POSIX        "tz_posix"
+
 // ---------------------------------------------------------------------------
 // String field size limits (bytes, including null terminator)
 // ---------------------------------------------------------------------------
@@ -100,6 +110,9 @@
 
 /** @brief Maximum length of the NTP server hostname string (incl. NUL). */
 #define NVS_STR_MAX_NTP     64
+
+/** @brief Maximum length of the POSIX TZ string (incl. NUL). e.g. "CET-1CEST,M3.5.0,M10.5.0/3" */
+#define NVS_STR_MAX_TZ      48
 
 // ---------------------------------------------------------------------------
 // API

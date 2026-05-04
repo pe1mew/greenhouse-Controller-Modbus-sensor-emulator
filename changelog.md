@@ -6,6 +6,79 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ---
 
+## [0.7.0] — 2026-05-04  Phase 7 — Web Interface: Server + WebSocket
+
+### Added — firmware (`firmware/sensorEmulator/`)
+- `web/web_server.h` / `web_server.cpp` — ESP-IDF httpd server on port 80:
+  - Serves `index.html`, `style.css`, `app.js` from SPIFFS (chunked transfer).
+  - WebSocket endpoint `/ws` — 1 Hz status push via `httpd_queue_work` +
+    `httpd_ws_send_frame_async` pattern.  Status JSON: `{type:"status",
+    fg:{temp, hum}, s200:{spd, dir}, wifi:{mode, ip, rssi}, time, ntp_synced}`.
+  - `POST /config/sensor` — clamps physical values to design §11 ranges,
+    writes `g_sensor_state` under mutex + NVS, returns clamped values +
+    `"clamped":bool`.
+  - `POST /config/wifi` — calls `wifi_manager_connect(ssid, pass)`.
+  - `POST /config/time` — `strptime` → `mktime` → `settimeofday`.
+  - `POST /config/ntp` — saves server string to NVS.
+  - `POST /replay/upload`, `POST /replay/control` — 501 stubs for Phase 11.
+  - `POST /log/clear` — broadcasts `{type:"log_clear"}` WebSocket frame.
+- `data/index.html` — dark-theme single-page app: status grid (FG6485A, S200,
+  WiFi, clock), FG6485A config card (addr + Manual/Live/Replay + sliders),
+  S200 config card, WiFi/NTP/time settings, Modbus log table.
+- `data/style.css` — CSS variables dark theme, `.badge`, `.grid4`, `.slider-row`,
+  `.card`, `#log-wrap` scrollable table.
+- `data/app.js` — `wsConnect()` (3 s reconnect), `handleStatus()`, `linkSlider()`
+  for all five slider pairs, `post()` fetch helper, `postFgManual/Addr`,
+  `postS200Manual/Addr`, `postWifi/Ntp/Time`, `appendLog/clearLogTable/postLogClear`,
+  XSS-safe `esc()` helper.
+
+### Changed — firmware
+- `platformio.ini` — added `board_build.filesystem = spiffs` to `[env:sensorEmulator]`.
+- `sensorEmulator/main.cpp` — Phase 7 banner; `#include "web/web_server.h"`;
+  `web_server_init()` called after `wifi_manager_init()`.
+
+### Verified
+- Build: SUCCESS, 0 errors, 0 warnings (Flash 69.1 % — 906 KB, RAM 14.6 % — 47 KB).
+- Flash procedure: `pio run -t uploadfs -e sensorEmulator` (SPIFFS), then
+  `pio run -t upload -e sensorEmulator` (firmware).
+
+---
+
+## [0.6.1] — 2026-05-04  Design & sensor-state: timezone, local-time replay, input clamping
+
+### Changed — design (`design/modbusSensorEmulator.md`)
+- **§8 Time Management** split into three subsections:
+  - §8.1 Clock source — NTP delivers UTC; manual fallback via `settimeofday()`.
+  - §8.2 Local time determination — timezone resolved from `live_lat`/`live_lon` coordinates to a POSIX TZ string (IANA rules, DST-aware); applied via `setenv("TZ",…)/tzset()`; UTC fallback on first boot; manual POSIX TZ override stored as NVS key `tz_posix`.
+  - §8.3 Display — WebSocket push shows DST-corrected local time + NTP-synced indicator.
+- **§2.3 Replay** — timestamps in CSV are local time (no UTC offset); comparison uses `localtime_r()` + `mktime()` for DST correctness; pre-flight warning if clock/timezone not ready; out-of-range CSV values clamped before applying.
+- **§4 FreeRTOS diagram** — `replay_task` description updated to "local clock time (DST-aware)".
+- **§6 Sensor Configuration** — Manual slider/input `min`/`max` attributes constrained to physical sensor ranges; `/config/sensor` POST handler clamps server-side and returns clamped value.
+- **§7 NVS settings table** — added `tz_posix` key (str, default "" = auto-resolved).
+- **§10 CSV Replay File Format** — example timestamps no longer carry `Z` suffix; new bullet documents `strptime()`/`localtime_r()` comparison, DST correctness, and pre-flight clock/timezone check.
+- **New §11 Input Validation & Clamping** — physical range table for all five sensor fields (FG6485A temp/humidity, S200 wind speed/direction/heating temp) with raw encoding; clamping rules for web UI and CSV replay; warning logged for clamped replay rows.
+- Old §11 Sequence of Development → §12; old §12 Reference Documentation → §13.
+
+### Changed — implementation plan (`firmware/implementationPlan.md`)
+- Phase 9 title updated to "NTP + Timezone + Manual Time"; tasks rewritten to cover POSIX TZ resolution from coordinates, manual TZ override POST, and local-time WebSocket push.
+- Phase 11 Replay rewritten: `csv_parser` uses `strptime()`/`struct tm`; `replay_task` uses `mktime()`/`localtime_r()` for DST-aware activation; clamping with `log_queue` warning.
+- Phase 7 Web UI task: slider `min`/`max` attributes set to sensor physical range.
+- Phase 8 Manual mode: `/config/sensor` POST handler clamps values before `sensor_state` write and NVS commit; verification cases for over/under-range inputs added.
+- Phase 5 task: `tz_posix` NVS key loaded and logged at boot.
+- IT-20 / IT-21 / IT-22 integration test cases added (UI clamping, replay clamping, local-time replay).
+
+### Changed — firmware (`firmware/sensorEmulator/`)
+- `config/nvs_config.h` — added `NVS_KEY_TZ_POSIX` (`"tz_posix"`) and `NVS_STR_MAX_TZ` (48 bytes).
+- `config/nvs_config.cpp` — `nvs_cfg_load_all()` reads and logs `tz_posix` at boot.
+- `sensors/sensor_state.h` — added physical range constants for all clamping consumers (Phases 8, 10, 11):
+  - `FG6485A_TEMP_RAW_MIN/MAX` (−400 / 1200), `FG6485A_HUM_RAW_MIN/MAX` (0 / 999)
+  - `S200_SPD_RAW_MIN/MAX` (0 / 60 000), `S200_DIR_RAW_MIN/MAX` (0 / 360 000), `S200_HEAT_RAW_MIN/MAX` (−40 000 / 85 000)
+
+### Verified
+- Build: SUCCESS, 0 warnings/errors (EXIT:0, Flash 59.9 %, RAM 14.1 %).
+
+---
+
 ## [0.6.0] — 2026-05-06  Phase 6: WiFi Manager & mDNS
 
 ### Added

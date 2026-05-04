@@ -74,6 +74,46 @@ typedef enum {
 #define FG6485A_DEVICE_ID_LOW   0x5678u
 
 // ---------------------------------------------------------------------------
+// Physical range constants (design §11.1)
+// Used for input clamping in web POST handlers (Phase 8), replay task
+// (Phase 11), and live-fetch value injection (Phase 10).
+// Raw encoding mirrors the register encoding described in the file header.
+// ---------------------------------------------------------------------------
+
+/** @defgroup fg_range FG6485A physical range (raw register units)
+ *  Temperature: raw = physical_°C × 10  (int16_t)
+ *  Humidity:    raw = physical_%RH × 10 (uint16_t)
+ * @{
+ */
+/** @brief FG6485A minimum temperature raw value: −40 °C → −400. */
+#define FG6485A_TEMP_RAW_MIN   ((int16_t)(-400))
+/** @brief FG6485A maximum temperature raw value: 120 °C → 1200. */
+#define FG6485A_TEMP_RAW_MAX   ((int16_t)(1200))
+/** @brief FG6485A minimum humidity raw value: 0.0 %RH → 0. */
+#define FG6485A_HUM_RAW_MIN    ((uint16_t)(0))
+/** @brief FG6485A maximum humidity raw value: 99.9 %RH → 999. */
+#define FG6485A_HUM_RAW_MAX    ((uint16_t)(999))
+/** @} */
+
+/** @defgroup s200_range SenseCAP S200 physical range (raw register units)
+ *  All S200 values: raw = physical × 1000  (int32_t)
+ * @{
+ */
+/** @brief S200 minimum wind speed raw value: 0 m/s → 0. */
+#define S200_SPD_RAW_MIN       ((int32_t)(0))
+/** @brief S200 maximum wind speed raw value: 60 m/s → 60 000. */
+#define S200_SPD_RAW_MAX       ((int32_t)(60000))
+/** @brief S200 minimum wind direction raw value: 0° → 0. */
+#define S200_DIR_RAW_MIN       ((int32_t)(0))
+/** @brief S200 maximum wind direction raw value: 360° → 360 000. */
+#define S200_DIR_RAW_MAX       ((int32_t)(360000))
+/** @brief S200 minimum heating temperature raw value: −40 °C → −40 000. */
+#define S200_HEAT_RAW_MIN      ((int32_t)(-40000))
+/** @brief S200 maximum heating temperature raw value: 85 °C → 85 000. */
+#define S200_HEAT_RAW_MAX      ((int32_t)(85000))
+/** @} */
+
+// ---------------------------------------------------------------------------
 // Shared state struct
 // ---------------------------------------------------------------------------
 

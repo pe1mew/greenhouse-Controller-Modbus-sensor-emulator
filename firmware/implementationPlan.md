@@ -17,11 +17,11 @@ the Modbus core; phases 5–8 add configuration and the web interface; phases
 | 2 | Modbus slave skeleton | ✅ Complete |
 | 3 | FG6485A emulation | ✅ Complete |
 | 4 | S200 emulation | ✅ Complete |
-| 5 | NVS settings | ⬜ Not started |
-| 6 | WiFi manager & mDNS | ⬜ Not started |
-| 7 | Web interface — server + WebSocket | ⬜ Not started |
-| 8 | Manual mode — UI wired to shared state | ⬜ Not started |
-| 9 | NTP + manual time | ⬜ Not started |
+| 5 | NVS settings | ✅ Complete |
+| 6 | WiFi manager & mDNS | ✅ Complete |
+| 7 | Web interface — server + WebSocket | ⏳ Not started |
+| 8 | Manual mode — UI wired to shared state | ⏳ Not started |
+| 9 | NTP + timezone + manual time | ⏳ Not started |
 | 10 | Live mode — Open-Meteo fetch | ⬜ Not started |
 | 11 | Replay mode — CSV playback | ⬜ Not started |
 | 12 | Modbus activity log | ⬜ Not started |
@@ -155,6 +155,7 @@ Apply; survive reboot.
 - [x] Load all settings at boot in `main.cpp` before tasks are started; populate `sensor_state` with manual defaults.
 - [x] FG6485A and S200 slave addresses loaded from NVS; `modbus_slave_task` uses them for address matching.
 - [x] Mode selection (MANUAL / LIVE / REPLAY) per sensor loaded from NVS (stored as `sensor_mode_t` fields in `sensor_state_t`).
+- [x] `tz_posix` key added (`NVS_KEY_TZ_POSIX`, `NVS_STR_MAX_TZ = 48`); loaded and logged at boot; empty string = auto-resolved from coordinates (Phase 9).
 
 ### Verification
 - Write a value via `nvs_cfg_set_*`, reboot, read it back — value persists. ✅
@@ -194,7 +195,7 @@ Apply; survive reboot.
 
 ---
 
-## Phase 7 — Web Interface: Server + WebSocket
+## Phase 7 — Web Interface: Server + WebSocket ✅ Complete
 
 **Goal**: Serve the complete web UI; push live sensor values and clock via
 WebSocket; handle all settings POSTs.
@@ -202,34 +203,35 @@ WebSocket; handle all settings POSTs.
 ### Files
 | File | Action |
 |------|--------|
-| `src/web/web_server.h` / `web_server.cpp` | Create — ESP-IDF httpd, URI handlers, WebSocket handler |
-| `data/index.html` | Create — single-page app (status + sensor config + WiFi settings + log) |
-| `data/style.css` | Create — minimal responsive CSS |
-| `data/app.js` | Create — WebSocket client, slider↔input sync, Apply button logic |
+| `src/web/web_server.h` / `web_server.cpp` | ✅ Created — ESP-IDF httpd, URI handlers, WebSocket handler |
+| `data/index.html` | ✅ Created — single-page app (status + sensor config + WiFi settings + log) |
+| `data/style.css` | ✅ Created — minimal responsive dark-theme CSS |
+| `data/app.js` | ✅ Created — WebSocket client, slider↔input sync, Apply button logic |
 
 ### Tasks
-- [ ] Start `httpd` with WebSocket support after WiFi manager initialises.
-- [ ] Serve `index.html`, `style.css`, `app.js` from SPIFFS.
-- [ ] WebSocket endpoint `/ws`:
+- [x] Start `httpd` with WebSocket support after WiFi manager initialises.
+- [x] Serve `index.html`, `style.css`, `app.js` from SPIFFS.
+- [x] WebSocket endpoint `/ws`:
   - Push JSON every 1 s: `{type:"status", fg:{temp, hum}, s200:{spd_avg, dir_avg}, wifi:{mode, ip, rssi}, time:"ISO8601"}`.
-  - Push Modbus log entries from `log_queue` as `{type:"log", ...}`.
-- [ ] HTTP POST `/config/sensor` — slave address, mode, manual values → NVS.
-- [ ] HTTP POST `/config/wifi` — SSID + password → `wifi_manager_connect()`.
-- [ ] HTTP POST `/config/time` — manual time string → `settimeofday()`.
-- [ ] HTTP POST `/config/ntp` — NTP server string → NVS + re-init SNTP.
-- [ ] HTTP POST `/replay/upload` — receive CSV, write to SPIFFS, reset replay task.
-- [ ] HTTP POST `/replay/control` — start / stop playback.
+  - Push Modbus log entries from `log_queue` as `{type:"log", ...}` (Phase 12 wires queue).
+- [x] HTTP POST `/config/sensor` — slave address, mode, manual values → NVS.
+  - Server-side: clamp each sensor value to its physical range (design §11.1) **before** writing to `sensor_state` and NVS.
+  - Return the clamped value in the HTTP response JSON so the UI can update its display.
+- [x] HTTP POST `/config/wifi` — SSID + password → `wifi_manager_connect()`.
+- [x] HTTP POST `/config/time` — manual time string → `settimeofday()`.
+- [x] HTTP POST `/config/ntp` — NTP server string → NVS.
+- [x] HTTP POST `/replay/upload` — 501 stub (Phase 11).
+- [x] HTTP POST `/replay/control` — 501 stub (Phase 11).
 
 #### Web UI — per-sensor card
 - Modbus slave address input + Apply.
-- Radio buttons: Manual / Live / Replay.
+- Radio buttons: Manual / Live (Phase 10) / Replay (Phase 11).
 - Manual section: one slider + input per value; slider movement syncs input box; Apply button sends POST.
-- Live section: lat/lon display (auto-resolved) with manual override inputs + Apply.
-- Replay section: file picker + Upload button; start/stop toggle; active-row indicator.
+  - Slider `min`/`max` attributes and numeric input `min`/`max` attributes are set to the sensor's physical range (design §11.1) so the browser enforces limits client-side.
 
 #### Web UI — status section
 - Both sensors: current served values, live-updated.
-- WiFi: mode badge, SSID, IP, RSSI bar.
+- WiFi: mode badge, IP, RSSI.
 - Clock: current time + NTP-synced indicator.
 
 #### Web UI — Modbus log
@@ -238,6 +240,7 @@ WebSocket; handle all settings POSTs.
 - Clear button (sends POST `/log/clear`).
 
 ### Verification
+- Build: ✅ SUCCESS — Flash 69.1 % (906 KB), RAM 14.6 % (47 KB), 0 errors, 0 warnings.
 - Open `http://192.168.4.1` in browser → full UI loads.
 - Sensor values update live every ~1 s.
 - Slider drag → input box updates immediately; Apply → value persists after reload.
@@ -257,38 +260,45 @@ responses; changes survive reboot.
 
 ### Tasks
 - [ ] Each mode task starts in MANUAL mode.
-- [ ] On POST `/config/sensor`, parse JSON body, acquire `sensor_state.mutex`, update the relevant fields, release mutex, write new values to NVS.
+- [ ] On POST `/config/sensor`, parse JSON body, **clamp each value to its physical range** (design §11.1), acquire `sensor_state.mutex`, update the relevant fields, release mutex, write clamped values to NVS.
 - [ ] `modbus_slave_task` always reads from `sensor_state` under mutex — no further changes needed in the slave.
 - [ ] Mode tasks run at low priority; they block on a notification queue fed by the web POST handler.
 
 ### Verification
 - Set FG6485A temperature to 35.0 °C (raw 350) via web UI → Modbus FC03 read of reg `0x0001` returns 350.
 - Reboot → value is 350 on first query.
+- POST temperature 999 (above 120 °C max) → value clamped to 1200 (120.0 °C), Modbus returns 1200.
+- POST humidity −1 → clamped to 0.
 
 ---
 
-## Phase 9 — NTP + Manual Time
+## Phase 9 — NTP + Timezone + Manual Time
 
-**Goal**: System clock set from NTP when online; settable manually via web UI;
-displayed in web interface.
+**Goal**: System clock set from NTP when online; local timezone resolved from
+location (with DST); settable manually via web UI; displayed in web interface.
 
 ### Files
 | File | Action |
 |------|--------|
-| `src/tasks/ntp_task.cpp` | Create — SNTP init on WIFI_STA_CONNECTED event, periodic re-sync |
+| `src/tasks/ntp_task.cpp` | Create — SNTP init on WIFI_STA_CONNECTED event, timezone apply, periodic re-sync |
 
 ### Tasks
 - [ ] On `WIFI_STA_CONNECTED` event bit: call `sntp_setoperatingmode(SNTP_OPMODE_POLL)`, `sntp_setservername(0, ntp_server_from_nvs)`, `sntp_init()`.
-- [ ] Set timezone to UTC (`setenv("TZ", "UTC0", 1); tzset()`).
+- [ ] **Timezone resolution** (design §8.2):
+  - Read `tz_posix` from NVS. If non-empty, apply it directly: `setenv("TZ", tz_posix, 1); tzset()`.
+  - If empty, resolve IANA/POSIX TZ string from `live_lat`/`live_lon` (lookup table or Open-Meteo timezone field). Store resolved string in NVS `tz_posix` and apply it.
+  - Fallback when coordinates unavailable or lookup fails: `setenv("TZ", "UTC0", 1)` and log a warning.
 - [ ] Expose `ntp_is_synced()` boolean (set via SNTP event callback).
 - [ ] On WiFi disconnect: `sntp_stop()`.
 - [ ] Manual time POST handler: parse ISO-8601 string → `struct timeval` → `settimeofday()`.
-- [ ] WebSocket status push includes current `time_t` formatted as ISO-8601 + `ntp_synced` boolean.
+- [ ] Manual TZ override POST handler: validate POSIX TZ string, write to NVS `tz_posix`, call `setenv` + `tzset()`.
+- [ ] WebSocket status push includes current local time formatted as ISO-8601 + UTC offset + `ntp_synced` boolean.
 
 ### Verification
-- Connect to WiFi with internet → serial log shows "NTP synced: 2026-xx-xxTxx:xx:xxZ".
-- Web UI clock updates and shows NTP-synced indicator.
-- Disconnect WiFi → manual time entry via web UI → clock advances correctly.
+- Connect to WiFi with internet → serial log shows NTP sync and resolved POSIX TZ string.
+- Web UI clock shows local time with correct DST offset, plus NTP-synced indicator.
+- Disconnect WiFi → manual time entry via web UI → clock advances correctly in local time.
+- Set manual POSIX TZ string → clock display changes offset immediately.
 
 ---
 
@@ -328,32 +338,36 @@ displayed in web interface.
 
 ## Phase 11 — Replay Mode
 
-**Goal**: CSV file uploaded to the device is played back in wall-clock time;
-Modbus responses reflect the active row's values.
+**Goal**: CSV file uploaded to the device is played back in **local time**
+(DST-aware); Modbus responses reflect the active row's values; out-of-range
+values are clamped before being applied.
 
 ### Files
 | File | Action |
 |------|--------|
-| `src/tasks/replay_task.cpp` | Create — CSV reader, timestamp comparator, value injector |
+| `src/tasks/replay_task.cpp` | Create — CSV reader, local-time timestamp comparator, value injector with clamping |
 | `src/util/csv_parser.h` / `csv_parser.cpp` | Create — line-by-line UTF-8 CSV reader from SPIFFS file |
 
 ### Tasks
 - [ ] `csv_parser`:
   - Open file from SPIFFS path stored in NVS `replay_file`.
   - Parse header row; map column names to `sensor_state` fields.
-  - `csv_next_row()` returns a struct with `time_t timestamp` + values for present columns.
+  - `csv_next_row()` returns a struct with `struct tm local_tm` + values for present columns.
+  - Parse each row's timestamp with `strptime()` (local time, no UTC offset).
 - [ ] `replay_task`:
   - Suspended at start; started by web POST `/replay/control {action:"start"}`.
-  - On start: open CSV, seek to first row where `timestamp >= now` (skip past rows).
-  - Main loop: peek next row timestamp; `vTaskDelay` until `now >= row.timestamp`; acquire mutex, apply values, release; advance to next row.
+  - Pre-flight check: verify `ntp_is_synced()` or manual time is set AND timezone is applied; log warning and defer if not.
+  - On start: open CSV, seek to first row where `mktime(&row.local_tm) >= now`.
+  - Main loop: peek next row timestamp; `vTaskDelay` until `time(NULL) >= mktime(&row.local_tm)`; **clamp each field to its physical range** (design §11.1); if any field was clamped, post a warning to `log_queue`; acquire mutex, apply clamped values, release; advance to next row.
   - On end-of-file: stop playback, notify web UI.
   - On stop command: suspend self.
   - Active row index posted to WebSocket status push so UI can highlight it.
 - [ ] File upload handler (registered in phase 7): write received bytes to SPIFFS, store path in NVS, reset replay task to stopped state.
 
 ### Verification
-- Upload a 10-row CSV spanning 5 minutes with known temperature values.
-- Start playback; query Modbus FC03 at expected timestamps → values match CSV rows.
+- Upload a 10-row CSV spanning 5 minutes with known temperature values (local time, no Z suffix).
+- Start playback; query Modbus FC03 at expected local timestamps → values match CSV rows.
+- Upload a CSV with one row containing temperature 999.9 → clamped to 120.0, warning in Modbus log.
 - Web UI shows current active row highlighted.
 
 ---
@@ -409,6 +423,9 @@ master from `documentation/code_modbusTestClient/`.
 | IT-17 | mDNS | `http://emulator.local` responds when STA connected |
 | IT-18 | NTP sync | Web UI clock shows NTP-synced indicator |
 | IT-19 | Manual time set | Clock advances correctly after WiFi off |
+| IT-20 | Input clamping — web UI | POST temperature 9999 → Modbus returns 1200 (120.0 °C max); POST humidity −1 → returns 0 |
+| IT-21 | Replay clamping | CSV row with wind speed 999.999 → clamped to 60.000, warning in Modbus log |
+| IT-22 | Replay local time | CSV row with local timestamp activates at correct local moment incl. DST offset |
 
 ### Procedure
 1. Flash firmware to Atom Lite.

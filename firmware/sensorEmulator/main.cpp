@@ -1,11 +1,10 @@
 /**
  * @file main.cpp
- * @brief Modbus Sensor Emulator — Phase 6: WiFi Manager & mDNS.
+ * @brief Modbus Sensor Emulator — Phase 7: Web Interface (HTTP + WebSocket).
  *
- * Adds concurrent WiFi management alongside the Modbus slave.  The WiFi
- * manager starts an open AP ("SensorEmulator-XXYY") on every boot and
- * attempts STA connection when NVS credentials are present.  On STA connect
- * mDNS registers the device as "emulator.local".
+ * Adds an HTTP/WebSocket server served from SPIFFS.  The web UI provides
+ * live status updates via WebSocket and POST endpoints for sensor config,
+ * WiFi credentials, NTP server, and manual time setting.
  *
  * Boot sequence:
  *   1. nvs_cfg_init()          — open "emulator" NVS namespace
@@ -13,6 +12,7 @@
  *   3. nvs_cfg_load_all()      — overwrite defaults with NVS-stored values
  *   4. Register Modbus handlers; start modbus_slave_task
  *   5. wifi_manager_init()     — start AP + STA FSM task
+ *   6. web_server_init()       — mount SPIFFS, start httpd + WebSocket push
  *
  * FG6485A (slave addr from NVS, default 1):
  *   FC03 0x0000–0x0001  → humidity + temperature (×10 encoding)
@@ -49,6 +49,7 @@
 #include "sensors/s200_slave.h"
 #include "config/nvs_config.h"
 #include "wifi/wifi_manager.h"
+#include "web/web_server.h"
 
 // ---------------------------------------------------------------------------
 // Arduino entry points
@@ -67,7 +68,7 @@ void setup()
 
     Serial.println();
     Serial.println("================================================");
-    Serial.println("  Modbus Sensor Emulator — Phase 6 WiFi & mDNS");
+    Serial.println("  Modbus Sensor Emulator — Phase 7 Web Interface");
     Serial.println("  M5Stack Atom Lite + Atomic RS485 Base");
     Serial.println("  9600 baud 8N1  |  LED G27  |  RX G22  TX G19");
     Serial.println("================================================");
@@ -93,6 +94,9 @@ void setup()
 
     // Start WiFi manager (AP + STA FSM + mDNS).
     wifi_manager_init();
+
+    // Start HTTP server + WebSocket push (mounts SPIFFS).
+    web_server_init();
 }
 
 void loop()

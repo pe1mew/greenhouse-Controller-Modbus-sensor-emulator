@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sensor Emulator</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header>
+  <h1>Modbus Sensor Emulator</h1>
+  <span id="ws-badge" class="badge offline">Offline</span>
+</header>
+
+<!-- ── Status ──────────────────────────────────────────────────── -->
+<section>
+  <h2>Status</h2>
+  <div class="grid4">
+
+    <div class="card">
+      <h3>FG6485A</h3>
+      <p>Temperature: <strong id="st-fg-temp">—</strong> °C</p>
+      <p>Humidity: <strong id="st-fg-hum">—</strong> %RH</p>
+    </div>
+
+    <div class="card">
+      <h3>S200</h3>
+      <p>Wind speed: <strong id="st-s200-spd">—</strong> m/s</p>
+      <p>Wind dir: <strong id="st-s200-dir">—</strong> °</p>
+    </div>
+
+    <div class="card">
+      <h3>WiFi</h3>
+      <p>Mode: <strong id="st-wifi-mode">—</strong></p>
+      <p>IP: <strong id="st-wifi-ip">—</strong></p>
+      <p>RSSI: <strong id="st-wifi-rssi">—</strong> dBm</p>
+    </div>
+
+    <div class="card">
+      <h3>Clock</h3>
+      <p id="st-time">—</p>
+      <span id="st-ntp" class="badge ntp-off">NTP pending</span>
+    </div>
+
+  </div>
+</section>
+
+<!-- ── FG6485A config ───────────────────────────────────────────── -->
+<section>
+  <h2>FG6485A — Temperature &amp; Humidity</h2>
+
+  <div class="row">
+    <label>Slave address (1–247)</label>
+    <input type="number" id="fg-addr" min="1" max="247" value="1" class="short">
+    <button onclick="postFgAddr()">Apply</button>
+  </div>
+
+  <div class="row">
+    <label>Mode</label>
+    <label class="radio"><input type="radio" name="fg-mode" value="0" checked> Manual</label>
+    <label class="radio"><input type="radio" name="fg-mode" value="1"> Live <em>(Phase 10)</em></label>
+    <label class="radio"><input type="radio" name="fg-mode" value="2"> Replay <em>(Phase 11)</em></label>
+  </div>
+
+  <div id="fg-manual">
+    <div class="slider-row">
+      <label>Temperature (°C)</label>
+      <input type="range"  id="fg-temp-sl" min="-40" max="120"  step="0.1" value="25">
+      <input type="number" id="fg-temp-in" min="-40" max="120"  step="0.1" value="25" class="short">
+    </div>
+    <div class="slider-row">
+      <label>Humidity (%RH)</label>
+      <input type="range"  id="fg-hum-sl"  min="0"   max="99.9" step="0.1" value="50">
+      <input type="number" id="fg-hum-in"  min="0"   max="99.9" step="0.1" value="50" class="short">
+    </div>
+    <button onclick="postFgManual()">Apply</button>
+  </div>
+</section>
+
+<!-- ── S200 config ──────────────────────────────────────────────── -->
+<section>
+  <h2>S200 — Wind &amp; Heating</h2>
+
+  <div class="row">
+    <label>Slave address (1–247)</label>
+    <input type="number" id="s200-addr" min="1" max="247" value="44" class="short">
+    <button onclick="postS200Addr()">Apply</button>
+  </div>
+
+  <div class="row">
+    <label>Mode</label>
+    <label class="radio"><input type="radio" name="s200-mode" value="0" checked> Manual</label>
+    <label class="radio"><input type="radio" name="s200-mode" value="1"> Live <em>(Phase 10)</em></label>
+    <label class="radio"><input type="radio" name="s200-mode" value="2"> Replay <em>(Phase 11)</em></label>
+  </div>
+
+  <div id="s200-manual">
+    <div class="slider-row">
+      <label>Wind speed (m/s)</label>
+      <input type="range"  id="s200-spd-sl"  min="0"   max="60"  step="0.001" value="5">
+      <input type="number" id="s200-spd-in"  min="0"   max="60"  step="0.001" value="5"   class="short">
+    </div>
+    <div class="slider-row">
+      <label>Wind direction (°)</label>
+      <input type="range"  id="s200-dir-sl"  min="0"   max="360" step="0.001" value="180">
+      <input type="number" id="s200-dir-in"  min="0"   max="360" step="0.001" value="180" class="short">
+    </div>
+    <div class="slider-row">
+      <label>Heating temp (°C)</label>
+      <input type="range"  id="s200-heat-sl" min="-40" max="85"  step="0.001" value="25">
+      <input type="number" id="s200-heat-in" min="-40" max="85"  step="0.001" value="25"  class="short">
+    </div>
+    <button onclick="postS200Manual()">Apply</button>
+  </div>
+</section>
+
+<!-- ── WiFi / NTP / Time ────────────────────────────────────────── -->
+<section>
+  <h2>WiFi Settings</h2>
+  <div class="row">
+    <label>SSID</label>
+    <input type="text"     id="wifi-ssid" maxlength="32" class="wide">
+  </div>
+  <div class="row">
+    <label>Password</label>
+    <input type="password" id="wifi-pass" maxlength="63" class="wide">
+  </div>
+  <button onclick="postWifi()">Connect</button>
+  <p class="hint">After connecting, the AP is disabled. Reconnect via
+    <code>http://emulator.local</code> or the assigned IP.</p>
+
+  <hr>
+  <h3>NTP</h3>
+  <div class="row">
+    <label>NTP server</label>
+    <input type="text" id="ntp-server" value="pool.ntp.org" class="wide">
+  </div>
+  <button onclick="postNtp()">Set NTP server</button>
+
+  <hr>
+  <h3>Manual time</h3>
+  <div class="row">
+    <label>Date &amp; time (local)</label>
+    <input type="datetime-local" id="manual-time" class="wide">
+  </div>
+  <button onclick="postTime()">Set time</button>
+</section>
+
+<!-- ── Modbus log ───────────────────────────────────────────────── -->
+<section>
+  <h2>Modbus Log
+    <button class="btn-sm" onclick="postLogClear()" style="float:right">Clear</button>
+  </h2>
+  <div id="log-wrap">
+    <table id="log-tbl">
+      <thead>
+        <tr><th>Time</th><th>Dir</th><th>Frame (hex)</th><th>Summary</th></tr>
+      </thead>
+      <tbody id="log-body"></tbody>
+    </table>
+  </div>
+</section>
+
+<script src="app.js"></script>
+</body>
+</html>
