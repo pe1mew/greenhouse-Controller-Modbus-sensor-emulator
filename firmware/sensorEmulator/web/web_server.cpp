@@ -22,6 +22,8 @@
 #include "../modbus/modbus_slave.h"
 #include "../sensors/fg6485a_slave.h"
 #include "../sensors/s200_slave.h"
+#include "../tasks/fg6485a_mode_task.h"
+#include "../tasks/s200_mode_task.h"
 
 #include <Arduino.h>
 #include <SPIFFS.h>
@@ -459,6 +461,8 @@ static esp_err_t handle_post_sensor(httpd_req_t *req)
             cJSON_AddNumberToObject(resp, "hum", cr / 10.0);
         }
 
+        fg6485a_mode_task_notify();
+
     } else if (strcmp(sensor, "s200") == 0) {
 
         cJSON *j_addr = cJSON_GetObjectItem(root, "addr");
@@ -518,6 +522,8 @@ static esp_err_t handle_post_sensor(httpd_req_t *req)
             xSemaphoreGive(g_sensor_state.mutex);
             cJSON_AddNumberToObject(resp, "heat", cr / 1000.0);
         }
+
+        s200_mode_task_notify();
     }
 
     cJSON_AddBoolToObject(resp, "clamped", clamped ? 1 : 0);

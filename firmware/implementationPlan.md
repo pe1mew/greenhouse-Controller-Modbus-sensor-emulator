@@ -19,8 +19,8 @@ the Modbus core; phases 5–8 add configuration and the web interface; phases
 | 4 | S200 emulation | ✅ Complete |
 | 5 | NVS settings | ✅ Complete |
 | 6 | WiFi manager & mDNS | ✅ Complete |
-| 7 | Web interface — server + WebSocket | ⏳ Not started |
-| 8 | Manual mode — UI wired to shared state | ⏳ Not started |
+| 7 | Web interface — server + WebSocket | ✅ Complete |
+| 8 | Manual mode — UI wired to shared state | ✅ Complete |
 | 9 | NTP + timezone + manual time | ⏳ Not started |
 | 10 | Live mode — Open-Meteo fetch | ⬜ Not started |
 | 11 | Replay mode — CSV playback | ⬜ Not started |
@@ -247,7 +247,7 @@ WebSocket; handle all settings POSTs.
 
 ---
 
-## Phase 8 — Manual Mode
+## Phase 8 — Manual Mode ✅ Complete
 
 **Goal**: Values set in the web interface are immediately reflected in Modbus
 responses; changes survive reboot.
@@ -255,20 +255,27 @@ responses; changes survive reboot.
 ### Files
 | File | Action |
 |------|--------|
-| `src/tasks/fg6485a_mode_task.cpp` | Create — mode task for FG6485A |
-| `src/tasks/s200_mode_task.cpp` | Create — mode task for S200 |
+| `sensorEmulator/tasks/fg6485a_mode_task.h` / `fg6485a_mode_task.cpp` | ✅ Created — mode dispatcher task + notify API |
+| `sensorEmulator/tasks/s200_mode_task.h` / `s200_mode_task.cpp` | ✅ Created — mode dispatcher task + notify API |
 
 ### Tasks
-- [ ] Each mode task starts in MANUAL mode.
-- [ ] On POST `/config/sensor`, parse JSON body, **clamp each value to its physical range** (design §11.1), acquire `sensor_state.mutex`, update the relevant fields, release mutex, write clamped values to NVS.
-- [ ] `modbus_slave_task` always reads from `sensor_state` under mutex — no further changes needed in the slave.
-- [ ] Mode tasks run at low priority; they block on a notification queue fed by the web POST handler.
+- [x] Each mode task starts in MANUAL mode (loaded from NVS at boot).
+- [x] On POST `/config/sensor`, the web handler clamps each value to its
+      physical range (design §11.1), acquires `sensor_state.mutex`, updates
+      the relevant fields, releases mutex, writes clamped values to NVS, then
+      calls `fg6485a_mode_task_notify()` or `s200_mode_task_notify()`.
+- [x] `modbus_slave_task` always reads from `sensor_state` under mutex — no
+      changes needed in the slave.
+- [x] Mode tasks run at `tskIDLE_PRIORITY + 1`; block on `ulTaskNotifyTake`
+      (5 s safety timeout) fed by the web POST handler notify calls.
 
 ### Verification
-- Set FG6485A temperature to 35.0 °C (raw 350) via web UI → Modbus FC03 read of reg `0x0001` returns 350.
-- Reboot → value is 350 on first query.
-- POST temperature 999 (above 120 °C max) → value clamped to 1200 (120.0 °C), Modbus returns 1200.
-- POST humidity −1 → clamped to 0.
+- Set FG6485A temperature to 35.0 °C (raw 350) via web UI → Modbus FC03
+  read of reg `0x0001` returns 350. ✅
+- Reboot → value is 350 on first query (NVS persistence). ✅
+- POST temperature 999 (above 120 °C max) → value clamped to 1200 (120.0 °C),
+  Modbus returns 1200. ✅
+- POST humidity −1 → clamped to 0. ✅
 
 ---
 
@@ -420,7 +427,7 @@ master from `documentation/code_modbusTestClient/`.
 | IT-14 | Replay mode: row advance | FC04 speed matches CSV value at correct timestamp |
 | IT-15 | Modbus log | Web UI log shows all IT-01–IT-14 frames |
 | IT-16 | WiFi AP SSID | `SensorEmulator-XXYY` (correct MAC suffix) |
-| IT-17 | mDNS | `http://emulator.local` responds when STA connected |
+| IT-17 | mDNS | `http://sensor-emulator.local` responds when STA connected |
 | IT-18 | NTP sync | Web UI clock shows NTP-synced indicator |
 | IT-19 | Manual time set | Clock advances correctly after WiFi off |
 | IT-20 | Input clamping — web UI | POST temperature 9999 → Modbus returns 1200 (120.0 °C max); POST humidity −1 → returns 0 |

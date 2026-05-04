@@ -1,18 +1,22 @@
 /**
  * @file main.cpp
- * @brief Modbus Sensor Emulator — Phase 7: Web Interface (HTTP + WebSocket).
+ * @brief Modbus Sensor Emulator — Phase 8: Manual Mode Tasks.
  *
- * Adds an HTTP/WebSocket server served from SPIFFS.  The web UI provides
- * live status updates via WebSocket and POST endpoints for sensor config,
- * WiFi credentials, NTP server, and manual time setting.
+ * Adds FG6485A and S200 mode dispatcher tasks that receive notifications
+ * from the web POST handler on every mode or value change.  For
+ * SENSOR_MODE_MANUAL (Phase 8) the tasks are essentially idle — the POST
+ * handler already writes sensor_state directly.  The tasks are the dispatch
+ * scaffolding for LIVE (Phase 10) and REPLAY (Phase 11) modes.
  *
  * Boot sequence:
- *   1. nvs_cfg_init()          — open "emulator" NVS namespace
- *   2. sensor_state_init()     — set hardcoded defaults + create mutex
- *   3. nvs_cfg_load_all()      — overwrite defaults with NVS-stored values
+ *   1. nvs_cfg_init()             — open "emulator" NVS namespace
+ *   2. sensor_state_init()        — set hardcoded defaults + create mutex
+ *   3. nvs_cfg_load_all()         — overwrite defaults with NVS-stored values
  *   4. Register Modbus handlers; start modbus_slave_task
- *   5. wifi_manager_init()     — start AP + STA FSM task
- *   6. web_server_init()       — mount SPIFFS, start httpd + WebSocket push
+ *   5. wifi_manager_init()        — start AP + STA FSM task
+ *   6. web_server_init()          — mount SPIFFS, start httpd + WebSocket push
+ *   7. fg6485a_mode_task start    — Phase 8 mode dispatcher
+ *   8. s200_mode_task start       — Phase 8 mode dispatcher
  *
  * FG6485A (slave addr from NVS, default 1):
  *   FC03 0x0000–0x0001  → humidity + temperature (×10 encoding)
@@ -50,6 +54,8 @@
 #include "config/nvs_config.h"
 #include "wifi/wifi_manager.h"
 #include "web/web_server.h"
+#include "tasks/fg6485a_mode_task.h"
+#include "tasks/s200_mode_task.h"
 
 // ---------------------------------------------------------------------------
 // Arduino entry points
@@ -74,7 +80,7 @@ void setup()
 
     Serial.println();
     Serial.println("================================================");
-    Serial.println("  Modbus Sensor Emulator — Phase 7 Web Interface");
+    Serial.println("  Modbus Sensor Emulator — Phase 8 Manual Mode");
     Serial.println("  M5Stack Atom Lite + Atomic RS485 Base");
     Serial.println("  9600 baud 8N1  |  LED G27  |  RX G22  TX G19");
     Serial.println("================================================");
@@ -103,6 +109,13 @@ void setup()
 
     // Start HTTP server + WebSocket push (mounts SPIFFS).
     web_server_init();
+
+    // Start mode dispatcher tasks (Phase 8).
+    // Low priority — yield to Modbus slave and WiFi tasks at all times.
+    xTaskCreate(fg6485a_mode_task, "fg6485a_mode", 2048, nullptr,
+                tskIDLE_PRIORITY + 1, nullptr);
+    xTaskCreate(s200_mode_task,    "s200_mode",    2048, nullptr,
+                tskIDLE_PRIORITY + 1, nullptr);
 }
 
 /**
