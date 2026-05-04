@@ -599,3 +599,282 @@ for the firmware lifetime.  This is the standard ESP-IDF pattern.
 | `esp_wifi_set_mode(WIFI_MODE_STA)` on STA connect | Used `WiFi.softAPdisconnect(true)` (Arduino API) — equivalent outcome, avoids mixing ESP-IDF and Arduino WiFi API layers. |
 | Single GOT_IP event assumed | ESP-IDF fires `STA_GOT_IP` twice when mode transitions occur. Fixed with `s_state != WIFI_STATE_STA` guard so only the first event triggers the AP-disable + mDNS sequence. |
 
+---
+
+## Phase 7 — Web Interface: Server + WebSocket ⚠️ Build-only (not yet flashed)
+
+**Date completed**: 2026-05-04
+
+### Outcome: BUILD PASS — hardware verification pending
+
+The firmware was built successfully and passed static analysis. It has **not yet
+been flashed to the target**. All findings and deviations below are based on
+code review and build output only.
+
+### Build metrics
+
+| Metric | Value |
+|--------|-------|
+| Build result | SUCCESS |
+| Compiler warnings | 0 |
+| RAM used | 14.6 % (47 832 / 327 680 bytes) |
+| Flash used | 69.1 % (905 813 / 1 310 720 bytes) |
+| Flash delta vs Phase 6 | +120 KB (SPIFFS assets + httpd + cJSON) |
+
+### Findings
+
+#### SPIFFS must be mounted before `httpd` starts
+
+`SPIFFS.begin(true)` must be called before `httpd_start()` and the static
+file handlers are registered. The `true` argument (formatOnFail) ensures the
+first boot succeeds even if the SPIFFS partition has never been formatted.
+`web_server_init()` is called after `wifi_manager_init()` in `main.cpp` so the
+WiFi stack is up before the HTTP server starts listening.
+
+#### Designated initialisers in C++17 GCC mode
+
+`httpd_uri_t` uses C99-style designated initialisers (`.uri =`, `.method =`,
+etc.). GCC in C++17 mode accepts these as an extension. Fields not explicitly
+initialised (e.g. `.is_websocket`, `.handle_ws_control_frames`) default to
+`false` / `nullptr` per C++ value-initialisation rules. No casts or workarounds
+were needed.
+
+#### WebSocket broadcast threading: `httpd_queue_work` pattern
+
+The 1 Hz WebSocket push runs in a dedicated FreeRTOS task (`ws_push_task`,
+priority 1, stack 4096 bytes). Direct calls to `httpd_ws_send_frame_async`
+from a non-httpd task are not allowed. The solution:
+
+1. `ws_push_task` allocates a `broadcast_ctx_t` struct on the heap containing
+   the JSON payload and a client socket FD.
+2. It calls `httpd_queue_work(server, broadcast_cb, ctx)` to schedule the send
+   inside the httpd task context.
+3. `broadcast_cb` calls `httpd_ws_send_frame_async`, then `free(ctx)`.
+
+This pattern ensures frame sends always happen from the httpd task thread,
+satisfying ESP-IDF's threading requirement. The `broadcast_ctx_t` is
+malloc'd in the push task and freed in the callback to avoid stack lifetime
+issues.
+
+#### `build_status_json` reads `g_sensor_state` under mutex
+
+The status JSON builder acquires `g_sensor_state.mutex`, snapshots all
+required fields into locals, releases the mutex, then formats the JSON string
+with cJSON. This keeps the critical section short (field copies only, no string
+allocation inside the lock).
+
+#### Heating temperature not persisted in NVS (runtime-only)
+
+The S200 heating temperature is intentionally not written to NVS in Phase 7.
+The `web_server.cpp` POST handler updates `g_sensor_state.s200_heat_raw`
+in-memory but does not call `nvs_cfg_set_i32("s200_heat_manual", ...)`.
+This is consistent with Phase 8 being the phase that fully wires manual mode
+state → NVS persistence. There is no `s200_heat_manual` NVS key defined yet.
+
+#### Client-side precision updates (post-Phase-7 UI refinement)
+
+After the Phase 7 build, the web UI was refined (outside the firmware build
+cycle) with the following changes applied directly to `firmware/data/`:
+
+- **Humidity** (`fg-hum`): `step` changed from 0.1 to 1; display changed from
+  `toFixed(1)` to `toFixed(0)` — integer %RH matches the raw encoding
+  (raw = %RH × 10, uint16).
+- **Wind speed** (`s200-spd`): `step` changed from 0.001 to 1; display changed
+  from `toFixed(3)` to `toFixed(0)`.
+- **Wind direction** (`s200-dir`): `step` changed from 0.001 to 1; display
+  changed from `toFixed(3)` to `toFixed(0)`.
+- **Heating temp** (`s200-heat`): `step` changed from 0.001 to 0.1; display
+  unchanged — one decimal place matches the raw encoding (raw = °C × 1000).
+- Log table columns made **user-resizable** via a JS drag handle; Time and Dir
+  columns pinned to fixed widths (72 px / 42 px) in CSS.
+- Section heading changed from **WiFi Settings** to **System Settings**; WiFi
+  demoted to a grey `<h3>` subheading alongside NTP and Manual time.
+
+These changes are in `firmware/data/` and will be included in the SPIFFS image
+at next flash.
+
+### Files created / changed
+
+| File | Change |
+|------|--------|
+| `sensorEmulator/web/web_server.h` | New — `web_server_init()` declaration |
+| `sensorEmulator/web/web_server.cpp` | New — ESP-IDF httpd, static file handlers, WebSocket push task, all POST handlers, cJSON status builder |
+| `firmware/data/index.html` | New — single-page UI: status cards, FG6485A config, S200 config, System Settings, Modbus log |
+| `firmware/data/style.css` | New — dark-theme CSS, responsive grid, badge variants, resizable-column handle styles |
+| `firmware/data/app.js` | New — WebSocket client, slider↔input sync, Apply POST functions, log table, column resizer init |
+| `firmware/platformio.ini` | Updated — `board_build.filesystem = spiffs` added to `[env:sensorEmulator]` |
+| `sensorEmulator/main.cpp` | Updated — Phase 7 banner; `#include "web/web_server.h"`; `web_server_init()` called after `wifi_manager_init()` |
+
+### Build verification
+
+| Check | Result |
+|-------|--------|
+| `pio run -e sensorEmulator` completes with 0 errors | ✅ Pass |
+| 0 compiler warnings | ✅ Pass |
+| Flash usage within 70 % budget | ✅ Pass (69.1 %) |
+| RAM usage within 50 % budget | ✅ Pass (14.6 %) |
+
+### Hardware verification
+
+| Check | Result |
+|-------|--------|
+| Firmware flashed to Atom Lite | ⏳ Pending |
+| `http://192.168.4.1` loads in browser | ⏳ Pending |
+| WebSocket connects; status updates every ~1 s | ⏳ Pending |
+| Slider apply → value changes in Modbus response | ⏳ Pending |
+| Value persists after page reload (Phase 8) | ⏳ Pending |
+
+### Deviations from plan
+
+| Plan item | Deviation |
+|-----------|-----------|
+| Heating temperature written to NVS on Apply | Not implemented in Phase 7 — deferred to Phase 8 (manual mode wiring). No `s200_heat_manual` NVS key exists yet. |
+| Single-phase "server + WebSocket + POST handlers" | UI precision and layout fixes applied post-build outside the firmware build cycle (SPIFFS assets only, no `.cpp` recompile needed). |
+
+---
+
+## Intermediate Step — Web Mock & GUI Review
+
+**Date completed**: 2026-05-04
+
+### Purpose
+
+Because Phase 7 firmware had not yet been flashed to hardware, a **desktop web
+mock** (`webMoc/server.py`) was built to allow the web GUI to be reviewed and
+iterated on a PC without any embedded target. The mock replicates the full
+HTTP + WebSocket interface of `web_server.cpp` using Python / Flask / flask-sock,
+serving the `firmware/data/` assets directly (no copy).
+
+### Mock implementation
+
+| File | Description |
+|------|-------------|
+| `webMoc/server.py` | Flask app — all routes, WebSocket 1 Hz push, simulated WiFi/NTP/time |
+| `webMoc/requirements.txt` | `flask>=3.0`, `flask-sock>=0.7` |
+| `webMoc/README.md` | Prerequisites, setup, endpoint reference, differences from firmware |
+
+**Mock behaviour contract** (same as firmware):
+- `GET /`, `/index.html`, `/style.css`, `/app.js` — served from `firmware/data/`
+- `GET /ws` — WebSocket; pushes `{type:"status", ...}` every 1 s; pushes synthetic Modbus log entries every 5 s (4 alternating frames)
+- `POST /config/sensor` — clamps raw values to physical ranges, returns clamped values
+- `POST /config/wifi` — sets mode to `Connecting`, transitions to `STA` / `IP=192.168.1.100` / `RSSI=-55` after 3 s timer
+- `POST /config/ntp` — saves server; sets `ntp_synced=True` after 2 s timer
+- `POST /config/time` — stores `time.time()` offset (mirrors `settimeofday()`)
+- `POST /log/clear` — broadcasts `{type:"log_clear"}` to all WS clients
+- `POST /replay/upload`, `POST /replay/control` — HTTP 501 stubs
+
+State is in-memory only; resets on server restart.
+
+### Findings from GUI review
+
+The following defects and usability issues were identified by interacting with
+the running mock in a browser and were corrected immediately in `firmware/data/`.
+
+#### 1 — FG6485A humidity: fractional step was wrong
+
+The slider and number input for humidity used `step="0.1"`, matching the
+temperature field. However, the FG6485A raw encoding for humidity is
+`raw = %RH × 10` stored as a `uint16` — the minimum meaningful step on the
+wire is 0.1 %RH, but the *user-facing* unit displayed by the sensor is integer
+%RH (the register holds tenths, not hundredths). Presenting tenths to the
+operator is misleading because the sensor reports whole-number %RH values to
+clients.
+
+**Fix**: `step` and `max` changed to `1` and `99` respectively on both slider
+and input. Status display changed from `toFixed(1)` to `toFixed(0)`. Parse
+function changed from `parseFloat` to `parseInt`.
+
+#### 2 — S200 wind speed: sub-m/s precision not meaningful for operator input
+
+The slider used `step="0.001"`, exposing all three decimal places of the raw
+encoding (`raw = m/s × 1000`). Wind speed sensors typically report in whole
+m/s or tenths; 0.001 m/s granularity is an artefact of the register encoding,
+not a useful control resolution.
+
+**Fix**: `step` changed to `1` on both slider and input. Status display changed
+from `toFixed(3)` to `toFixed(0)`. Parse function changed from `parseFloat`
+to `parseInt`.
+
+#### 3 — S200 wind direction: sub-degree precision not needed for manual entry
+
+Same issue as wind speed — `step="0.001"` exposes 0.001° granularity from the
+raw encoding (`raw = ° × 1000`), which is not useful when entering a compass
+bearing manually.
+
+**Fix**: `step` changed to `1` on both slider and input. Status display changed
+from `toFixed(3)` to `toFixed(0)`. Parse function changed from `parseFloat`
+to `parseInt`.
+
+#### 4 — S200 heating temperature: should match FG6485A temperature (one decimal)
+
+Heating temperature uses `raw = °C × 1000`, but the meaningful precision for
+this sensor is one decimal place (tenths of a degree), matching the FG6485A
+temperature field. Using `step="0.001"` made the input behave differently from
+temperature without a physical justification.
+
+**Fix**: `step` changed to `0.1` on both slider and input. Status display and
+parse function (`parseFloat`) unchanged — one decimal place retained.
+
+#### 5 — Log table columns could not be resized
+
+The Modbus log table used the browser's default auto-layout, which assigns
+column widths based on content. When long hex frames appeared, the Frame column
+expanded unpredictably, pushing the Summary column off-screen. There was no
+way for the user to adjust column widths.
+
+**Fix**: A `col-resizer` drag handle was added to each `<th>` via JavaScript
+(`initResizableCols()`). The table is set to `table-layout: fixed`. Dragging
+a handle resizes the column with a 40 px minimum. The `.col-resizer` element
+and its `:hover` / `.dragging` states were added to `style.css`.
+
+#### 6 — Time and Dir columns: too narrow / too wide depending on content
+
+The Time and Dir log columns fluctuated in width with the resizer in place and
+did not need to be user-adjustable — their content is always a fixed-length
+timestamp and a two/three-character direction label.
+
+**Fix**: CSS `nth-child(1)` (Time: 72 px) and `nth-child(2)` (Dir: 42 px) rules
+with matching `min-width` / `max-width` pin them to fixed sizes. The
+`initResizableCols()` function skips adding a resizer handle to the first two
+columns (`FIXED_COLS = 2`).
+
+#### 7 — "WiFi Settings" section heading was not visually consistent
+
+The System Settings section had a white `<h2>` reading "WiFi Settings" — a
+title that referred only to one sub-section. NTP and Manual time were already
+rendered as grey `<h3>` sub-headings beneath it, but WiFi was treated as a
+top-level heading visually.
+
+**Fix**: The `<h2>` text changed to "System Settings". WiFi was demoted to a
+grey `<h3>` (`<h3>WiFi</h3>`) alongside the existing NTP and Manual time
+sub-headings.
+
+### Files changed by GUI review
+
+| File | Changes |
+|------|---------|
+| `firmware/data/index.html` | Humidity `step`/`max` → `1`/`99`; wind speed and direction `step` → `1`; heating temp `step` → `0.1`; "WiFi Settings" `<h2>` → "System Settings" + WiFi `<h3>` |
+| `firmware/data/app.js` | Humidity `parseFloat` → `parseInt`; wind speed and direction `parseFloat` → `parseInt`; `toFixed` display precision updated; `initResizableCols()` function added and called at boot |
+| `firmware/data/style.css` | `.col-resizer` styles added; `#log-tbl th` gains `overflow: hidden; white-space: nowrap`; `nth-child(1)` and `nth-child(2)` fixed-width rules added |
+
+### Verification
+
+| Check | Result |
+|-------|--------|
+| `python server.py` starts without error | ✅ Pass |
+| `http://127.0.0.1:5000` loads in browser | ✅ Pass |
+| WebSocket connects; status badge shows Online | ✅ Pass |
+| Status values update every 1 s | ✅ Pass |
+| Humidity slider moves in integer steps | ✅ Pass |
+| Wind speed slider moves in integer steps | ✅ Pass |
+| Wind direction slider moves in integer steps | ✅ Pass |
+| Heating temp slider moves in 0.1 °C steps | ✅ Pass |
+| Apply on FG6485A → POST `/config/sensor` → clamped response updates inputs | ✅ Pass |
+| Log entries appear every 5 s (synthetic frames) | ✅ Pass |
+| Log column drag resizes Frame and Summary columns | ✅ Pass |
+| Time and Dir columns do not resize | ✅ Pass |
+| WiFi connect POST → mode shows Connecting, then STA after 3 s | ✅ Pass |
+| NTP POST → ntp_synced badge turns green after 2 s | ✅ Pass |
+| Clear log → table empties | ✅ Pass |
+| Section header reads "System Settings"; WiFi is a grey sub-heading | ✅ Pass |
+
