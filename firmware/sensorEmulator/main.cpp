@@ -1,12 +1,16 @@
 /**
  * @file main.cpp
- * @brief Modbus Sensor Emulator — Phase 8: Manual Mode Tasks.
+ * @brief Modbus Sensor Emulator — Phase 10: Live Mode.
  *
- * Adds FG6485A and S200 mode dispatcher tasks that receive notifications
- * from the web POST handler on every mode or value change.  For
- * SENSOR_MODE_MANUAL (Phase 8) the tasks are essentially idle — the POST
- * handler already writes sensor_state directly.  The tasks are the dispatch
- * scaffolding for LIVE (Phase 10) and REPLAY (Phase 11) modes.
+ * Adds the live-fetch task which periodically queries Open-Meteo for current
+ * weather (temperature, humidity, wind speed, wind direction) and injects the
+ * values into g_sensor_state for sensors operating in SENSOR_MODE_LIVE.
+ * ip-api.com is queried on each new WiFi-STA connection to obtain a coarse
+ * lat/lon from the public IP; the coordinates can be overridden at any time
+ * via POST /config/location.
+ *
+ * Retains FG6485A and S200 mode dispatcher tasks from Phase 8 and the NTP
+ * task from Phase 9.
  *
  * Boot sequence:
  *   1. nvs_cfg_init()             — open "emulator" NVS namespace
@@ -15,8 +19,10 @@
  *   4. Register Modbus handlers; start modbus_slave_task
  *   5. wifi_manager_init()        — start AP + STA FSM task
  *   6. web_server_init()          — mount SPIFFS, start httpd + WebSocket push
- *   7. fg6485a_mode_task start    — Phase 8 mode dispatcher
- *   8. s200_mode_task start       — Phase 8 mode dispatcher
+ *   7. ntp_task_init()            — Phase 9: SNTP + TZ manager
+ *   8. live_fetch_task_init()     — Phase 10: Open-Meteo weather fetch
+ *   9. fg6485a_mode_task start   — Phase 8 mode dispatcher
+ *  10. s200_mode_task start      — Phase 8 mode dispatcher
  *
  * FG6485A (slave addr from NVS, default 1):
  *   FC03 0x0000–0x0001  → humidity + temperature (×10 encoding)
@@ -56,6 +62,8 @@
 #include "web/web_server.h"
 #include "tasks/fg6485a_mode_task.h"
 #include "tasks/s200_mode_task.h"
+#include "tasks/ntp_task.h"
+#include "tasks/live_fetch_task.h"
 
 // ---------------------------------------------------------------------------
 // Arduino entry points
@@ -80,7 +88,7 @@ void setup()
 
     Serial.println();
     Serial.println("================================================");
-    Serial.println("  Modbus Sensor Emulator — Phase 8 Manual Mode");
+    Serial.println("  Modbus Sensor Emulator — Phase 10 Live Mode");
     Serial.println("  M5Stack Atom Lite + Atomic RS485 Base");
     Serial.println("  9600 baud 8N1  |  LED G27  |  RX G22  TX G19");
     Serial.println("================================================");
@@ -109,6 +117,14 @@ void setup()
 
     // Start HTTP server + WebSocket push (mounts SPIFFS).
     web_server_init();
+
+    // Start NTP synchronisation task (Phase 9).
+    // Priority 2 — same as wifi_manager; runs promptly on connect/disconnect.
+    ntp_task_init();
+
+    // Start Open-Meteo live-fetch task (Phase 10).
+    // Starts blocked; wakes when a sensor is set to LIVE mode.
+    live_fetch_task_init();
 
     // Start mode dispatcher tasks (Phase 8).
     // Low priority — yield to Modbus slave and WiFi tasks at all times.

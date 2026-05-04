@@ -12,6 +12,7 @@
  */
 
 #include "fg6485a_mode_task.h"
+#include "live_fetch_task.h"
 #include "../sensors/sensor_state.h"
 
 #include <Arduino.h>
@@ -74,8 +75,8 @@ void fg6485a_mode_task(void *arg)
             break;
 
         case SENSOR_MODE_LIVE:
-            // Phase 10: live_fetch_task will inject values from Open-Meteo.
-            Serial.println("[fg6485a_mode] LIVE — Phase 10 not yet implemented");
+            // Phase 10: wake the live_fetch_task to fetch from Open-Meteo.
+            live_fetch_task_notify();
             break;
 
         case SENSOR_MODE_REPLAY:

@@ -32,15 +32,110 @@ function wsConnect() {
 // ── Status update ────────────────────────────────────────────────────────
 let wsInitialized = false;
 
+const MODE_NAMES = ['Manual', 'Live', 'Replay'];
+
+/** 87 s = LIVE_FETCH_INTERVAL_S on the firmware side. */
+const LIVE_FETCH_INTERVAL_S = 87;
+
+// Enable/disable the manual-values section based on sensor mode.
+function updateManualSection(sensor, mode) {
+  const div = document.getElementById(sensor + '-manual');
+  if (!div) return;
+  const disabled = (mode !== 0);
+  div.classList.toggle('manual-disabled', disabled);
+  div.querySelectorAll('input, button').forEach(el => { el.disabled = disabled; });
+}
+
+// Update/hide the live-fetch countdown bar and info line.
+function updateLiveFetchBar(age_s, any_live, fetch_ok, lat, lon) {
+  const row  = document.getElementById('live-fetch-bar-row');
+  const fill = document.getElementById('live-fetch-fill');
+  const rem  = document.getElementById('live-fetch-remaining');
+  const info = document.getElementById('live-fetch-info');
+  if (!row) return;
+  if (!any_live) {
+    row.style.display  = 'none';
+    if (info) info.style.display = 'none';
+    return;
+  }
+  row.style.display = 'flex';
+  if (info) info.style.display = 'block';
+
+  if (age_s < 0) {
+    // Never fetched yet — show empty bar, label 'waiting'
+    if (fill) fill.style.width = '0%';
+    if (rem)  rem.textContent  = '...';
+    if (info) info.textContent = 'Waiting for first fetch…';
+  } else {
+    const pct = Math.max(0, (1 - age_s / LIVE_FETCH_INTERVAL_S)) * 100;
+    if (fill) fill.style.width = pct.toFixed(1) + '%';
+    const secs_left = Math.max(0, LIVE_FETCH_INTERVAL_S - age_s);
+    if (rem)  rem.textContent  = secs_left + 's';
+
+    if (info) {
+      const lastTime  = new Date(Date.now() - age_s * 1000);
+      const timeStr   = lastTime.toLocaleTimeString();
+      const statusMark = (fetch_ok === null) ? '' : (fetch_ok ? ' ✓' : ' ✗ failed');
+      let html = 'Last fetch: ' + timeStr + statusMark;
+      if (lat !== null && lon !== null) {
+        const url = 'https://api.open-meteo.com/v1/forecast'
+          + '?latitude='  + lat.toFixed(4)
+          + '&longitude=' + lon.toFixed(4)
+          + '&current=temperature_2m,relative_humidity_2m'
+          + ',wind_speed_10m,wind_direction_10m&wind_speed_unit=ms';
+        html += ' &nbsp;·&nbsp; <a href="' + url + '" target="_blank" rel="noopener noreferrer">Verify on Open-Meteo ↗</a>';
+      }
+      info.innerHTML = html;
+    }
+  }
+}
+
 function handleStatus(s) {
+  let any_live = false;
   if (s.fg) {
     setText('st-fg-temp', s.fg.temp !== undefined ? s.fg.temp.toFixed(1) : '—');
     setText('st-fg-hum',  s.fg.hum  !== undefined ? s.fg.hum.toFixed(0)  : '—');
+    if (s.fg.mode !== undefined) {
+      setText('st-fg-mode', MODE_NAMES[s.fg.mode] || '—');
+      const r = document.querySelector('input[name="fg-mode"][value="' + s.fg.mode + '"]');
+      if (r) r.checked = true;
+      updateManualSection('fg', s.fg.mode);
+      if (s.fg.mode !== 0) any_live = true;
+    }
+    // Always update slider/input in Live or Replay so the user can see the
+    // current served value; in Manual only sync on first connect.
+    const fg_mode = (s.fg.mode !== undefined) ? s.fg.mode : 0;
+    if (fg_mode !== 0 || !wsInitialized) {
+      if (s.fg.temp !== undefined) setSliderInput('fg-temp-sl', 'fg-temp-in', s.fg.temp);
+      if (s.fg.hum  !== undefined) setSliderInput('fg-hum-sl',  'fg-hum-in',  s.fg.hum);
+    }
   }
   if (s.s200) {
     setText('st-s200-spd', s.s200.spd !== undefined ? s.s200.spd.toFixed(0) : '—');
     setText('st-s200-dir', s.s200.dir !== undefined ? s.s200.dir.toFixed(0) : '—');
+    if (s.s200.mode !== undefined) {
+      setText('st-s200-mode', MODE_NAMES[s.s200.mode] || '—');
+      const r = document.querySelector('input[name="s200-mode"][value="' + s.s200.mode + '"]');
+      if (r) r.checked = true;
+      updateManualSection('s200', s.s200.mode);
+      if (s.s200.mode !== 0) any_live = true;
+    }
+    const s200_mode = (s.s200.mode !== undefined) ? s.s200.mode : 0;
+    if (s200_mode !== 0 || !wsInitialized) {
+      if (s.s200.spd  !== undefined) setSliderInput('s200-spd-sl',  's200-spd-in',  s.s200.spd);
+      if (s.s200.dir  !== undefined) setSliderInput('s200-dir-sl',  's200-dir-in',  s.s200.dir);
+      if (s.s200.heat !== undefined) setSliderInput('s200-heat-sl', 's200-heat-in', s.s200.heat);
+    }
   }
+
+  // Live-fetch progress bar.
+  updateLiveFetchBar(
+    (s.live_fetch_age !== undefined) ? s.live_fetch_age : -1,
+    any_live,
+    (s.live_fetch_ok  !== undefined) ? !!s.live_fetch_ok : null,
+    (s.live && s.live.lat !== undefined) ? s.live.lat : null,
+    (s.live && s.live.lon !== undefined) ? s.live.lon : null
+  );
 
   // On first message: sync all editable controls to the device's current state.
   if (!wsInitialized) {
@@ -50,25 +145,22 @@ function handleStatus(s) {
         const el = document.getElementById('fg-addr');
         if (el) el.value = s.fg.addr;
       }
-      if (s.fg.mode !== undefined) {
-        const r = document.querySelector('input[name="fg-mode"][value="' + s.fg.mode + '"]');
-        if (r) r.checked = true;
-      }
-      if (s.fg.temp !== undefined) setSliderInput('fg-temp-sl', 'fg-temp-in', s.fg.temp);
-      if (s.fg.hum  !== undefined) setSliderInput('fg-hum-sl',  'fg-hum-in',  s.fg.hum);
     }
     if (s.s200) {
       if (s.s200.addr !== undefined) {
         const el = document.getElementById('s200-addr');
         if (el) el.value = s.s200.addr;
       }
-      if (s.s200.mode !== undefined) {
-        const r = document.querySelector('input[name="s200-mode"][value="' + s.s200.mode + '"]');
-        if (r) r.checked = true;
-      }
-      if (s.s200.spd  !== undefined) setSliderInput('s200-spd-sl',  's200-spd-in',  s.s200.spd);
-      if (s.s200.dir  !== undefined) setSliderInput('s200-dir-sl',  's200-dir-in',  s.s200.dir);
-      if (s.s200.heat !== undefined) setSliderInput('s200-heat-sl', 's200-heat-in', s.s200.heat);
+    }
+    if (s.wifi) {
+      const ssidEl = document.getElementById('wifi-ssid');
+      if (ssidEl && s.wifi.ssid) ssidEl.value = s.wifi.ssid;
+    }
+    if (s.live) {
+      const latEl = document.getElementById('live-lat');
+      const lonEl = document.getElementById('live-lon');
+      if (latEl && s.live.lat !== undefined) latEl.value = s.live.lat.toFixed(4);
+      if (lonEl && s.live.lon !== undefined) lonEl.value = s.live.lon.toFixed(4);
     }
   }
   if (s.wifi) {
@@ -76,7 +168,7 @@ function handleStatus(s) {
     setText('st-wifi-ip',   s.wifi.ip   || '—');
     setText('st-wifi-rssi', s.wifi.rssi !== undefined ? s.wifi.rssi : '—');
   }
-  setText('st-time', s.time || '—');
+  setText('st-time', s.time ? s.time.replace('T', ' ') : '—');
   const ntp = document.getElementById('st-ntp');
   if (ntp) {
     if (s.ntp_synced) {
@@ -127,12 +219,22 @@ function postFgAddr() {
   post('/config/sensor', { sensor: 'fg6485a', addr });
 }
 
+function postFgMode(mode) {
+  mode = parseInt(mode, 10);
+  post('/config/sensor', { sensor: 'fg6485a', mode }).then(r => {
+    if (!r) return;
+    updateManualSection('fg', mode);
+  });
+}
+
 function postFgManual() {
-  const mode = Number(document.querySelector('input[name="fg-mode"]:checked').value);
   const temp = parseFloat(document.getElementById('fg-temp-in').value);
   const hum  = parseInt(document.getElementById('fg-hum-in').value, 10);
-  post('/config/sensor', { sensor: 'fg6485a', mode, temp, hum }).then(r => {
+  // Applying manual values always switches the mode to Manual.
+  post('/config/sensor', { sensor: 'fg6485a', mode: 0, temp, hum }).then(r => {
     if (!r) return;
+    const r0 = document.querySelector('input[name="fg-mode"][value="0"]');
+    if (r0) r0.checked = true;
     if (r.temp !== undefined) setSliderInput('fg-temp-sl', 'fg-temp-in', r.temp);
     if (r.hum  !== undefined) setSliderInput('fg-hum-sl',  'fg-hum-in',  r.hum);
   });
@@ -144,13 +246,23 @@ function postS200Addr() {
   post('/config/sensor', { sensor: 's200', addr });
 }
 
+function postS200Mode(mode) {
+  mode = parseInt(mode, 10);
+  post('/config/sensor', { sensor: 's200', mode }).then(r => {
+    if (!r) return;
+    updateManualSection('s200', mode);
+  });
+}
+
 function postS200Manual() {
-  const mode = Number(document.querySelector('input[name="s200-mode"]:checked').value);
   const spd  = parseInt(document.getElementById('s200-spd-in').value, 10);
   const dir  = parseInt(document.getElementById('s200-dir-in').value, 10);
   const heat = parseFloat(document.getElementById('s200-heat-in').value);
-  post('/config/sensor', { sensor: 's200', mode, spd, dir, heat }).then(r => {
+  // Applying manual values always switches the mode to Manual.
+  post('/config/sensor', { sensor: 's200', mode: 0, spd, dir, heat }).then(r => {
     if (!r) return;
+    const r0 = document.querySelector('input[name="s200-mode"][value="0"]');
+    if (r0) r0.checked = true;
     if (r.spd  !== undefined) setSliderInput('s200-spd-sl',  's200-spd-in',  r.spd);
     if (r.dir  !== undefined) setSliderInput('s200-dir-sl',  's200-dir-in',  r.dir);
     if (r.heat !== undefined) setSliderInput('s200-heat-sl', 's200-heat-in', r.heat);
@@ -174,6 +286,25 @@ function postNtp() {
 function postTime() {
   const val = document.getElementById('manual-time').value;
   if (val) post('/config/time', { time: val });
+}
+
+function postTz() {
+  const tz = document.getElementById('tz-posix').value.trim();
+  post('/config/tz', { tz }).then(r => {
+    if (r && r.tz) document.getElementById('tz-posix').value = r.tz;
+  });
+}
+
+// ── Location ────────────────────────────────────────────────────────────────────
+function postLocation() {
+  const lat = parseFloat(document.getElementById('live-lat').value);
+  const lon = parseFloat(document.getElementById('live-lon').value);
+  if (isNaN(lat) || isNaN(lon)) return;
+  post('/config/location', { lat, lon }).then(r => {
+    if (!r) return;
+    if (r.lat !== undefined) document.getElementById('live-lat').value = r.lat.toFixed(4);
+    if (r.lon !== undefined) document.getElementById('live-lon').value = r.lon.toFixed(4);
+  });
 }
 
 // ── Modbus log ───────────────────────────────────────────────────────────

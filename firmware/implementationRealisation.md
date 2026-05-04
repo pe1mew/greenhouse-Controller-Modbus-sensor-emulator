@@ -1018,3 +1018,140 @@ slave task.
 | Mode task wake-up mechanism unspecified | Implemented as `xTaskNotifyGive` / `ulTaskNotifyTake` (direct-to-task notification). Chosen over a queue because only one bit of information is needed: "something changed". |
 | Tasks listed as `ntp_task.cpp` only in the source tree | Two additional task files created: `fg6485a_mode_task.h/.cpp` and `s200_mode_task.h/.cpp` — headers were added alongside the `.cpp` files to allow other translation units to call the notify API cleanly. |
 
+---
+
+## Phase 9 — NTP + Timezone + Manual Time ✅
+
+### Summary
+
+Adds SNTP-based clock synchronisation and POSIX timezone support.
+`ntp_task` monitors the WiFi EventGroup: starts SNTP when STA connects,
+stops it (and clears `ntp_synced`) when STA disconnects.  The POSIX TZ
+string is read from NVS at boot and applied immediately; a new POST
+`/config/tz` endpoint lets the operator update it at runtime.  The WebSocket
+status push now reflects real sync state via `ntp_is_synced()`.
+
+### Build metrics
+
+| Metric | Value |
+|--------|-------|
+| Flash | 915 201 B / 1 310 720 B (69.8%) |
+| RAM | 49 124 B / 327 680 B (15.0%) |
+| Compiler | xtensa-esp32 8.4.0+2021r2-patch5 |
+| Flash delta vs Phase 8 | +8 990 B |
+| RAM delta vs Phase 8 | +2 084 B |
+
+### Files changed
+
+| File | Change |
+|------|--------|
+| `sensorEmulator/tasks/ntp_task.h` | Created — `ntp_task_init()`, `ntp_is_synced()` public API |
+| `sensorEmulator/tasks/ntp_task.cpp` | Created — SNTP start/stop on WiFi EventGroup bits; TZ from NVS; sync callback |
+| `sensorEmulator/web/web_server.cpp` | `#include ntp_task.h`; `ntp_is_synced()` in `build_status_json()`; `handle_post_tz()` + `/config/tz` URI; `max_uri_handlers` → 17 |
+| `sensorEmulator/main.cpp` | `#include tasks/ntp_task.h`; `ntp_task_init()` after `web_server_init()`; banner → "Phase 9 NTP + Timezone"; updated docstring |
+| `data/index.html` | Added Timezone section (POSIX TZ input + Apply button) between NTP and Manual Time sections |
+| `data/app.js` | Added `postTz()` function; response `tz` field written back to input |
+
+### Key design decisions
+
+| Decision | Rationale |
+|----------|-----------|
+| `static char s_server_buf[]` in module scope | `sntp_setservername()` stores a raw pointer; a local buffer would be freed after `start_sntp()` returns, causing a dangling pointer on the next SNTP restart cycle. |
+| Separate `start_sntp()` / `stop_sntp()` idempotent helpers | Called on every connect/disconnect cycle; guards prevent double-init / double-stop. |
+| SNTP sync callback sets `volatile bool` only | No mutex needed for a single boolean — the volatile qualifier prevents the compiler from caching the read across calls. |
+| TZ fallback to `"UTC0"` (not empty string) | An empty TZ environment variable is undefined behaviour on some libc implementations; `"UTC0"` is the safe explicit UTC POSIX string. |
+
+### Hardware verification
+
+| Test | Result |
+|------|--------|
+| Firmware + filesystem flash without errors | ✅ Pass |
+| Boot banner shows "Phase 9 NTP + Timezone" | ✅ Pass (verified via serial monitor) |
+| `[ntp] no TZ in NVS — using UTC0` on first boot | ✅ Pass |
+| WiFi connect → `[ntp] SNTP started server=pool.ntp.org` | ✅ Pass |
+| `[ntp] clock synchronised` logged after NTP sync | ✅ Pass |
+| WebSocket `ntp_synced` transitions false → true after sync | ✅ Pass |
+| POST `/config/tz` with Netherlands POSIX string → applied and persisted | ✅ Pass |
+| Reboot after TZ set → `[ntp] TZ applied from NVS: CET-1CEST,...` | ✅ Pass |
+| WiFi disconnect → `[ntp] SNTP stopped`, `ntp_synced` → false | ✅ Pass |
+| Modbus responses unaffected throughout | ✅ Pass |
+
+---
+
+## Post-Phase-9 UI fixes (patch 0.9.1) ✅
+
+### Summary
+
+Four UI defects found during hardware verification of Phase 9, fixed and reflashed in two rounds.
+
+### Files changed
+
+| File | Change |
+|------|--------|
+| `data/app.js` | `s.time.replace('T', ' ')` — remove ISO 8601 `T` separator from displayed clock string |
+| `data/app.js` | Populate `wifi-ssid` input from `s.wifi.ssid` on first WebSocket message |
+| `data/style.css` | `.card .badge { display: inline-block; margin-top: .75rem; }` — move NTP badge below the time text with consistent spacing; badge sized to text |
+| `data/index.html` | `style="margin-bottom:.75rem"` on the TZ hint `<p>` — consistent gap before Apply timezone button |
+| `sensorEmulator/web/web_server.cpp` | `build_status_json()` — add `"ssid"` field to `wifi` object via `WiFi.SSID()` when in STA mode |
+
+### Hardware verification
+
+| Test | Result |
+|------|--------|
+| Clock shows `"2026-05-04 14:59:37"` (space, no `T`) | ✅ Pass |
+| NTP badge sits below time text with visible gap, width = text width | ✅ Pass |
+| Gap between TZ hint and Apply timezone button consistent with other gaps | ✅ Pass |
+| WiFi SSID field pre-filled with connected network name on page load | ✅ Pass |
+
+---
+
+## Phase 10 — Live Mode ✅
+
+### Goal
+
+Sensor values fetched automatically from Open-Meteo and injected into
+`g_sensor_state` whenever either sensor is in `SENSOR_MODE_LIVE`.
+Rate-limited to ≤ 1 000 API calls/day.  Coordinates obtained via ip-api.com
+geolocation on each new WiFi-STA connection, with manual override via web UI.
+
+### Files created
+
+| File | Description |
+|------|-------------|
+| `sensorEmulator/net/geo_ip.h` | Public API — `geo_ip_get_location(float *lat, float *lon)` |
+| `sensorEmulator/net/geo_ip.cpp` | HTTP GET `http://ip-api.com/json/` → parse lat/lon → store in NVS |
+| `sensorEmulator/tasks/live_fetch_task.h` | Public API — `live_fetch_task_init()`, `live_fetch_task_notify()` |
+| `sensorEmulator/tasks/live_fetch_task.cpp` | FreeRTOS task; HTTPS GET Open-Meteo; injects clamped values; 87 s rate limiter |
+
+### Files modified
+
+| File | Change |
+|------|--------|
+| `sensorEmulator/tasks/fg6485a_mode_task.cpp` | `#include "live_fetch_task.h"`; LIVE branch calls `live_fetch_task_notify()` |
+| `sensorEmulator/tasks/s200_mode_task.cpp` | `#include "live_fetch_task.h"`; LIVE branch calls `live_fetch_task_notify()` |
+| `sensorEmulator/web/web_server.cpp` | `#include "../tasks/live_fetch_task.h"`; `handle_post_location()` for POST `/config/location`; `live` object (`lat`, `lon`) in status JSON; `max_uri_handlers` bumped from 17 → 18; registered `u_location` URI |
+| `sensorEmulator/main.cpp` | `#include "tasks/live_fetch_task.h"`; `live_fetch_task_init()` after `ntp_task_init()`; banner → "Phase 10 Live Mode"; updated docstring |
+| `data/index.html` | Removed `<em>(Phase 10)</em>` label from FG6485A and S200 Live radio buttons; added Location section (lat/lon inputs + Apply) in System Settings |
+| `data/app.js` | `postLocation()` function (POST `/config/location`); lat/lon inputs populated from `s.live` on first WebSocket message |
+
+### Implementation notes
+
+- **Open-Meteo URL**: uses `current=temperature_2m,relative_humidity_2m,wind_speed_10m,wind_direction_10m&wind_speed_unit=ms` — response is compact (~500 B); no hourly data requested.
+- **HTTPS**: `WiFiClientSecure` + `setInsecure()` — acceptable for a non-sensitive public API on an embedded device.
+- **ip-api.com**: plain HTTP free tier — no cert complexity; called once per new STA IP address.
+- **Rate limiting**: `ulTaskNotifyTake` with 87 s timeout; `xTaskGetTickCount` guard prevents a re-fetch when the mode task's 5 s safety notification fires before the interval elapses.
+- **Injection rules**: FG6485A — only if `fg_mode == LIVE`; S200 — only if `s200_mode == LIVE`; heating temperature not touched (no weather field available).
+- **Flash / RAM**: RAM 15.3% (50 232 B), Flash 83.2% (1 091 137 B).
+
+### Hardware verification
+
+| Test | Result |
+|------|--------|
+| Boot banner shows "Phase 10 Live Mode" | ⬜ Pending |
+| FG6485A in Live mode — temperature and humidity update after ≤ 87 s | ⬜ Pending |
+| S200 in Live mode — wind speed and direction update after ≤ 87 s | ⬜ Pending |
+| Location section visible in System Settings; lat/lon pre-filled from NVS | ⬜ Pending |
+| POST `/config/location` accepted; new coordinates used on next fetch | ⬜ Pending |
+| Disconnect WiFi mid-live — last good values held; reconnect resumes fetching | ⬜ Pending |
+
+

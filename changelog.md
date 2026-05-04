@@ -6,6 +6,103 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ---
 
+## [0.10.0] — 2026-05-04  Phase 10 — Live Mode
+
+### Added — firmware (`firmware/sensorEmulator/`)
+- `net/geo_ip.h` / `net/geo_ip.cpp` — `geo_ip_get_location(float *lat, float *lon)`:
+  HTTP GET to `http://ip-api.com/json/` (plain HTTP, free tier); parses `lat` and
+  `lon` from the JSON response and persists them to NVS (`live_lat` / `live_lon`).
+  Called once per new WiFi-STA IP address.
+- `tasks/live_fetch_task.h` / `tasks/live_fetch_task.cpp` — FreeRTOS task (priority 2,
+  8 KiB stack) that queries the Open-Meteo `/v1/forecast` endpoint with
+  `current=temperature_2m,relative_humidity_2m,wind_speed_10m,wind_direction_10m&wind_speed_unit=ms`.
+  Parses the compact `current` JSON object via cJSON; injects clamped raw values into
+  `g_sensor_state` under mutex for every sensor currently in `SENSOR_MODE_LIVE`.
+  Rate-limited to one fetch per 87 s (≤ 1 000 calls/day).  Blocks indefinitely when
+  neither sensor is in LIVE mode; wakes on `live_fetch_task_notify()`.
+- `web/web_server.cpp` — `handle_post_location()` handler for POST `/config/location`:
+  accepts `{"lat": float, "lon": float}`, clamps to ±90 / ±180, writes to NVS, and
+  notifies the live-fetch task.  `max_uri_handlers` bumped 17 → 18.
+- `web/web_server.cpp` — `build_status_json()` now includes a `"live"` object with
+  the current `lat` and `lon` values from NVS, surfaced to the UI on every push.
+
+### Added — web assets (`firmware/data/`)
+- `data/index.html` — Location section added to System Settings (latitude/longitude
+  number inputs + "Apply location" button); `<em>(Phase 10)</em>` labels removed from
+  FG6485A and S200 Live mode radio buttons.
+- `data/app.js` — `postLocation()` function (POST `/config/location`); lat/lon inputs
+  populated from `s.live` on first WebSocket message.
+
+### Changed
+- `tasks/fg6485a_mode_task.cpp` — LIVE branch now calls `live_fetch_task_notify()`
+  instead of printing a stub message.
+- `tasks/s200_mode_task.cpp` — same as above.
+- `main.cpp` — `live_fetch_task_init()` called after `ntp_task_init()`; boot banner
+  updated to "Phase 10 Live Mode".
+
+### Build metrics
+- RAM: 15.3% (50 232 / 327 680 B)
+- Flash: 83.2% (1 091 137 / 1 310 720 B)
+
+---
+
+## [0.9.1] — 2026-05-04  UI fixes — clock format, NTP badge spacing, TZ hint spacing, SSID display
+
+### Fixed — web assets (`firmware/data/`)
+- `data/app.js` — clock string now displays with a space separator instead of the ISO 8601 `T`
+  (`"2026-05-04 14:59:37"` instead of `"2026-05-04T14:59:37"`).
+- `data/app.js` — on first WebSocket connect the `wifi-ssid` input is populated with the
+  currently connected SSID received in `s.wifi.ssid`.
+- `data/style.css` — `.card .badge` rule added: `display: inline-block; margin-top: .75rem`.
+  The NTP badge in the Clock card is now visually separated from the time text and
+  sized to its content (not stretched full-width).
+- `data/index.html` — `margin-bottom: .75rem` added inline to the Timezone hint paragraph
+  so the gap before the "Apply timezone" button matches the rest of the settings layout.
+
+### Fixed — firmware (`firmware/sensorEmulator/`)
+- `web/web_server.cpp` — `build_status_json()` now includes `"ssid"` in the `wifi` JSON
+  object (`WiFi.SSID()` when in STA mode, empty string otherwise).
+
+### Verified
+- Firmware + filesystem flashed to hardware (COM5).  All four fixes confirmed in browser.
+
+---
+
+## [0.9.0] — 2026-05-04  Phase 9 — NTP + Timezone + Manual Time
+
+### Added — firmware (`firmware/sensorEmulator/`)
+- `tasks/ntp_task.h` / `tasks/ntp_task.cpp` — FreeRTOS task (priority 2,
+  3 KiB stack) that applies the POSIX TZ string from NVS at boot, then
+  monitors the WiFi EventGroup to start SNTP on STA connect and stop it
+  (clearing the sync flag) on STA disconnect.  Uses a module-level static
+  server name buffer to avoid a dangling pointer across `sntp_setservername`
+  restart cycles.
+- `web/web_server.cpp` — `handle_post_tz()` handler for POST `/config/tz`:
+  accepts `{"tz":"<POSIX string>"}`, applies `setenv("TZ",…)`/`tzset()`, and
+  persists the string to NVS `tz_posix`; `max_uri_handlers` bumped to 17.
+  `ntp_is_synced()` now wired into `build_status_json()` to provide a real
+  `ntp_synced` value in the WebSocket status push.
+- `main.cpp` — `ntp_task_init()` called after `web_server_init()`; banner
+  updated to "Phase 9 NTP + Timezone".
+
+### Added — web assets (`firmware/data/`)
+- `data/index.html` — Timezone section added between NTP and Manual Time in
+  System Settings: POSIX TZ string text input + Apply button, with an example
+  for the Netherlands (`CET-1CEST,M3.5.0,M10.5.0/3`) as a hint.
+- `data/app.js` — `postTz()` function POSTs `{"tz":"…"}` to `/config/tz` and
+  writes the server-confirmed TZ string back to the input field on success.
+
+### Verified
+- Build: SUCCESS — Flash 69.8% (915 201 B / 1 310 720 B), RAM 15.0% (49 124 B / 327 680 B).
+- Flashed firmware + filesystem to hardware (COM5, ESP32-PICO-D4, MAC 14:2b:2f:a0:b7:8c).
+- On first boot: `[ntp] no TZ in NVS — using UTC0` logged as expected.
+- WiFi connect → `[ntp] SNTP started server=pool.ntp.org` → `[ntp] clock synchronised`.
+- WebSocket `ntp_synced` badge transitions from off → on after sync.
+- POST `/config/tz` with Netherlands string persists across reboot.
+- WiFi disconnect → `[ntp] SNTP stopped`, badge returns to off.
+
+---
+
 ## [0.8.0] — 2026-05-04  Phase 8 — Manual Mode Tasks
 
 ### Added — firmware (`firmware/sensorEmulator/`)

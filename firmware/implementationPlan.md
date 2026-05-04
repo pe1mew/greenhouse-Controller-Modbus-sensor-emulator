@@ -21,7 +21,7 @@ the Modbus core; phases 5–8 add configuration and the web interface; phases
 | 6 | WiFi manager & mDNS | ✅ Complete |
 | 7 | Web interface — server + WebSocket | ✅ Complete |
 | 8 | Manual mode — UI wired to shared state | ✅ Complete |
-| 9 | NTP + timezone + manual time | ⏳ Not started |
+| 9 | NTP + timezone + manual time | ✅ Complete |
 | 10 | Live mode — Open-Meteo fetch | ⬜ Not started |
 | 11 | Replay mode — CSV playback | ⬜ Not started |
 | 12 | Modbus activity log | ⬜ Not started |
@@ -283,35 +283,40 @@ responses; changes survive reboot.
 
 ## Phase 9 — NTP + Timezone + Manual Time
 
-**Goal**: System clock set from NTP when online; local timezone resolved from
-location (with DST); settable manually via web UI; displayed in web interface.
+**Goal**: System clock set from NTP when online; POSIX TZ string stored in NVS
+and applied at boot; settable manually via web UI.
 
 ### Files
 | File | Action |
 |------|--------|
-| `src/tasks/ntp_task.cpp` | Create — SNTP init on WIFI_STA_CONNECTED event, timezone apply, periodic re-sync |
+| `sensorEmulator/tasks/ntp_task.h` | Create — public API: `ntp_task_init()`, `ntp_is_synced()` |
+| `sensorEmulator/tasks/ntp_task.cpp` | Create — SNTP start/stop on WiFi connect/disconnect; TZ from NVS |
+| `sensorEmulator/web/web_server.cpp` | Modify — add `handle_post_tz()`, register `/config/tz`, wire `ntp_is_synced()` |
+| `sensorEmulator/main.cpp` | Modify — add `ntp_task_init()` call, update banner + docstring |
+| `data/index.html` | Modify — add Timezone section with POSIX TZ input + Apply button |
+| `data/app.js` | Modify — add `postTz()` function |
 
 ### Tasks
-- [ ] On `WIFI_STA_CONNECTED` event bit: call `sntp_setoperatingmode(SNTP_OPMODE_POLL)`, `sntp_setservername(0, ntp_server_from_nvs)`, `sntp_init()`.
-- [ ] **Timezone resolution** (design §8.2):
-  - Read `tz_posix` from NVS. If non-empty, apply it directly: `setenv("TZ", tz_posix, 1); tzset()`.
-  - If empty, resolve IANA/POSIX TZ string from `live_lat`/`live_lon` (lookup table or Open-Meteo timezone field). Store resolved string in NVS `tz_posix` and apply it.
-  - Fallback when coordinates unavailable or lookup fails: `setenv("TZ", "UTC0", 1)` and log a warning.
-- [ ] Expose `ntp_is_synced()` boolean (set via SNTP event callback).
-- [ ] On WiFi disconnect: `sntp_stop()`.
-- [ ] Manual time POST handler: parse ISO-8601 string → `struct timeval` → `settimeofday()`.
-- [ ] Manual TZ override POST handler: validate POSIX TZ string, write to NVS `tz_posix`, call `setenv` + `tzset()`.
-- [ ] WebSocket status push includes current local time formatted as ISO-8601 + UTC offset + `ntp_synced` boolean.
+- [x] On `WIFI_STA_CONNECTED` event bit: call `sntp_setoperatingmode(SNTP_OPMODE_POLL)`, `sntp_setservername(0, ntp_server_from_nvs)`, `sntp_init()`.
+- [x] **Timezone resolution**: read `tz_posix` from NVS; apply via `setenv("TZ", ..., 1); tzset()`. Fallback to `"UTC0"` with warning when key is empty.
+- [x] Expose `ntp_is_synced()` boolean (set via SNTP sync callback).
+- [x] On WiFi disconnect: `sntp_stop()`, clear `ntp_synced` flag.
+- [x] Manual time POST handler already implemented (Phase 7): ISO-8601 → `settimeofday()`.
+- [x] Manual TZ override POST `/config/tz`: validate length, `setenv` + `tzset()`, persist to NVS.
+- [x] WebSocket status push `ntp_synced` field wired to `ntp_is_synced()`.
 
 ### Verification
-- Connect to WiFi with internet → serial log shows NTP sync and resolved POSIX TZ string.
-- Web UI clock shows local time with correct DST offset, plus NTP-synced indicator.
-- Disconnect WiFi → manual time entry via web UI → clock advances correctly in local time.
-- Set manual POSIX TZ string → clock display changes offset immediately.
+- Build: `[SUCCESS]` — RAM 15.0% (49 124 B / 327 680 B), Flash 69.8% (915 201 B / 1 310 720 B).
+- Serial banner shows `"Phase 9 NTP + Timezone"` on boot.
+- Device boots → serial log shows `[ntp] no TZ in NVS — using UTC0` (or applied POSIX string if previously set).
+- WiFi connect → `[ntp] SNTP started  server=pool.ntp.org` → `[ntp] clock synchronised`.
+- WebSocket status push `ntp_synced` transitions from `false` to `true` after sync; UI badge turns green.
+- POST `/config/tz` with `{"tz":"CET-1CEST,M3.5.0,M10.5.0/3"}` → serial log shows TZ applied; persists across reboot.
+- WiFi disconnect → `[ntp] SNTP stopped`; `ntp_synced` returns to `false` in next status push.
 
 ---
 
-## Phase 10 — Live Mode
+## Phase 10 — Live Mode ✅
 
 **Goal**: Sensor values automatically fetched from Open-Meteo and injected into
 `sensor_state`; rate-limited to ≤ 1 000 calls/day.
@@ -319,25 +324,24 @@ location (with DST); settable manually via web UI; displayed in web interface.
 ### Files
 | File | Action |
 |------|--------|
-| `src/tasks/live_fetch_task.cpp` | Create — HTTPS fetch, JSON parse, rate limiter |
-| `src/net/geo_ip.h` / `geo_ip.cpp` | Create — IP-geolocation API call → lat/lon |
+| `sensorEmulator/tasks/live_fetch_task.h` / `live_fetch_task.cpp` | ✅ Created — HTTPS GET Open-Meteo `current` endpoint, JSON parse via cJSON, 87 s rate limiter using `ulTaskNotifyTake` |
+| `sensorEmulator/net/geo_ip.h` / `geo_ip.cpp` | ✅ Created — HTTP GET `ip-api.com/json/` → lat/lon → NVS |
 
 ### Tasks
-- [ ] `geo_ip_get_location(float *lat, float *lon)`:
-  - HTTPS GET `https://ip-api.com/json/` (or equivalent free endpoint).
+- [x] `geo_ip_get_location(float *lat, float *lon)`:
+  - HTTP GET `http://ip-api.com/json/?fields=status,lat,lon` (plain HTTP, free tier).
   - Parse JSON response for `lat`, `lon` fields.
   - Store in NVS as `live_lat` / `live_lon`.
-  - Call once on STA connect; refresh only when IP changes.
-- [ ] `live_fetch_task`:
-  - Suspended at start; resumed when either sensor switches to LIVE mode.
-  - Rate limiter: `vTaskDelay(pdMS_TO_TICKS(87000))` between fetches (87 s = 86 400 s / 1 000 calls).
-  - Build Open-Meteo URL:
-    `https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current_weather=true&hourly=relativehumidity_2m,temperature_2m`
-  - Parse JSON: extract `current_weather.temperature`, `current_weather.windspeed`, `current_weather.winddirection`, and current-hour `relativehumidity_2m`.
-  - Acquire `sensor_state.mutex`, update fields for sensors that are in LIVE mode, release.
+  - Called once per new STA IP address (tracked via `WiFi.localIP()`).
+- [x] `live_fetch_task`:
+  - Starts blocked; wakes when either sensor switches to LIVE (mode task calls `live_fetch_task_notify()`).
+  - Rate limiter: `ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(87000))` between fetches.
+  - Build Open-Meteo URL: `current=temperature_2m,relative_humidity_2m,wind_speed_10m,wind_direction_10m&wind_speed_unit=ms`
+  - Parse JSON: extract fields from `current` object.
+  - Acquire `sensor_state.mutex`, update fields only for sensors in LIVE mode, release.
   - On fetch failure: retain previous values; log error.
-- [ ] When both sensors leave LIVE mode: suspend task.
-- [ ] Manual lat/lon override in NVS (`live_lat` / `live_lon`) used when geo-IP fails or is overridden via web UI.
+- [x] Task blocks indefinitely when neither sensor is in LIVE mode.
+- [x] Manual lat/lon override via POST `/config/location`; auto-detected via geo-IP on connect.
 
 ### Verification
 - Set FG6485A to Live mode → after ≤ 87 s, Modbus FC03 returns temperature matching current Open-Meteo data for the location.

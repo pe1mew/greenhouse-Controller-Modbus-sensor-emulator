@@ -24,6 +24,8 @@
 #include "../sensors/s200_slave.h"
 #include "../tasks/fg6485a_mode_task.h"
 #include "../tasks/s200_mode_task.h"
+#include "../tasks/ntp_task.h"
+#include "../tasks/live_fetch_task.h"
 
 #include <Arduino.h>
 #include <SPIFFS.h>
@@ -315,10 +317,24 @@ static void build_status_json(char *buf, size_t buf_size)
     cJSON_AddStringToObject(wf, "mode", mode_str);
     cJSON_AddStringToObject(wf, "ip",   ip);
     cJSON_AddNumberToObject(wf, "rssi", rssi);
+    {
+        String sta_ssid = (wst == WIFI_STATE_STA) ? WiFi.SSID() : String("");
+        cJSON_AddStringToObject(wf, "ssid", sta_ssid.c_str());
+    }
     cJSON_AddItemToObject(root, "wifi", wf);
 
     cJSON_AddStringToObject(root, "time", time_str);
-    cJSON_AddBoolToObject(root, "ntp_synced", 0);  // Phase 9 will set true
+    cJSON_AddBoolToObject(root, "ntp_synced", ntp_is_synced() ? 1 : 0);
+
+    cJSON *lv = cJSON_CreateObject();
+    cJSON_AddNumberToObject(lv, "lat",
+        nvs_cfg_get_float(NVS_KEY_LIVE_LAT, 52.37f));
+    cJSON_AddNumberToObject(lv, "lon",
+        nvs_cfg_get_float(NVS_KEY_LIVE_LON,  4.90f));
+    cJSON_AddItemToObject(root, "live", lv);
+
+    cJSON_AddNumberToObject(root, "live_fetch_age", live_fetch_get_age_s());
+    cJSON_AddBoolToObject(root, "live_fetch_ok",  live_fetch_was_ok() ? 1 : 0);
 
     char *str = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
@@ -669,6 +685,119 @@ static esp_err_t handle_post_ntp(httpd_req_t *req)
 }
 
 // ---------------------------------------------------------------------------
+// POST /config/tz
+// ---------------------------------------------------------------------------
+
+/**
+ * @brief Handle POST /config/tz — apply and persist a POSIX TZ string.
+ *
+ * JSON body: @code { "tz":"CET-1CEST,M3.5.0,M10.5.0/3" } @endcode
+ *
+ * An empty @c tz value is accepted and stored (ntp_task will fall back to
+ * "UTC0" on next boot); the live setenv call in that case uses "UTC0".
+ *
+ * @param req  Incoming HTTP POST request.
+ * @return ESP_OK; HTTP 400 is sent on parse error.
+ */
+static esp_err_t handle_post_tz(httpd_req_t *req)
+{
+    char body[128];
+    if (read_body(req, body, sizeof(body)) != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Read error");
+        return ESP_OK;
+    }
+    cJSON *root = cJSON_Parse(body);
+    if (!root) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "JSON parse error");
+        return ESP_OK;
+    }
+    cJSON *j_tz = cJSON_GetObjectItem(root, "tz");
+    const char *applied = "UTC0";
+    if (cJSON_IsString(j_tz)) {
+        char buf[NVS_STR_MAX_TZ];
+        strncpy(buf, j_tz->valuestring, sizeof(buf) - 1);
+        buf[sizeof(buf) - 1] = '\0';
+        applied = (buf[0] != '\0') ? buf : "UTC0";
+        setenv("TZ", applied, 1);
+        tzset();
+        nvs_cfg_set_str(NVS_KEY_TZ_POSIX, buf);
+        Serial.printf("[web] TZ applied: %s\n", applied);
+    }
+    cJSON_Delete(root);
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddBoolToObject(resp, "ok", 1);
+    cJSON_AddStringToObject(resp, "tz", applied);
+    char *resp_str = cJSON_PrintUnformatted(resp);
+    cJSON_Delete(resp);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, resp_str ? resp_str : "{\"ok\":true}");
+    free(resp_str);
+    return ESP_OK;
+}
+
+// ---------------------------------------------------------------------------
+// POST /config/location
+// ---------------------------------------------------------------------------
+
+/**
+ * @brief Handle POST /config/location — persist lat/lon for Live-mode fetch.
+ *
+ * JSON body: @code { "lat": 52.37, "lon": 4.90 } @endcode
+ *
+ * Values are clamped to valid geographic ranges (lat ±90, lon ±180) and
+ * stored in NVS.  The live_fetch_task is notified to pick up the new
+ * coordinates on its next cycle.
+ *
+ * @param req  Incoming HTTP POST request.
+ * @return ESP_OK; HTTP 400 is sent on parse error.
+ */
+static esp_err_t handle_post_location(httpd_req_t *req)
+{
+    char body[128];
+    if (read_body(req, body, sizeof(body)) != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Read error");
+        return ESP_OK;
+    }
+    cJSON *root = cJSON_Parse(body);
+    if (!root) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "JSON parse error");
+        return ESP_OK;
+    }
+    cJSON *j_lat = cJSON_GetObjectItem(root, "lat");
+    cJSON *j_lon = cJSON_GetObjectItem(root, "lon");
+    if (!cJSON_IsNumber(j_lat) || !cJSON_IsNumber(j_lon)) {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing lat/lon");
+        return ESP_OK;
+    }
+    // Clamp to valid geographic ranges.
+    float lat = (float)j_lat->valuedouble;
+    float lon = (float)j_lon->valuedouble;
+    if (lat < -90.0f)  lat = -90.0f;
+    if (lat >  90.0f)  lat =  90.0f;
+    if (lon < -180.0f) lon = -180.0f;
+    if (lon >  180.0f) lon =  180.0f;
+    cJSON_Delete(root);
+
+    nvs_cfg_set_float(NVS_KEY_LIVE_LAT, lat);
+    nvs_cfg_set_float(NVS_KEY_LIVE_LON, lon);
+    live_fetch_task_notify();   // Wake fetch task to use new coordinates.
+
+    Serial.printf("[web] Location set: %.4f, %.4f\n", lat, lon);
+
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddBoolToObject(resp, "ok", 1);
+    cJSON_AddNumberToObject(resp, "lat", lat);
+    cJSON_AddNumberToObject(resp, "lon", lon);
+    char *resp_str = cJSON_PrintUnformatted(resp);
+    cJSON_Delete(resp);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, resp_str ? resp_str : "{\"ok\":true}");
+    free(resp_str);
+    return ESP_OK;
+}
+
+// ---------------------------------------------------------------------------
 // Phase 11/12 stubs
 // ---------------------------------------------------------------------------
 
@@ -769,7 +898,7 @@ void web_server_init(void)
 
     // Configure and start httpd.
     httpd_config_t cfg    = HTTPD_DEFAULT_CONFIG();
-    cfg.max_uri_handlers  = 16;
+    cfg.max_uri_handlers  = 18;
     cfg.max_open_sockets  = 7;
     cfg.lru_purge_enable  = true;
 
@@ -824,6 +953,14 @@ void web_server_init(void)
         .uri = "/config/ntp", .method = HTTP_POST,
         .handler = handle_post_ntp
     };
+    const httpd_uri_t u_tz = {
+        .uri = "/config/tz", .method = HTTP_POST,
+        .handler = handle_post_tz
+    };
+    const httpd_uri_t u_location = {
+        .uri = "/config/location", .method = HTTP_POST,
+        .handler = handle_post_location
+    };
     const httpd_uri_t u_replay_up = {
         .uri = "/replay/upload", .method = HTTP_POST,
         .handler = handle_not_implemented
@@ -846,6 +983,8 @@ void web_server_init(void)
     httpd_register_uri_handler(s_server, &u_wifi);
     httpd_register_uri_handler(s_server, &u_time);
     httpd_register_uri_handler(s_server, &u_ntp);
+    httpd_register_uri_handler(s_server, &u_tz);
+    httpd_register_uri_handler(s_server, &u_location);
     httpd_register_uri_handler(s_server, &u_replay_up);
     httpd_register_uri_handler(s_server, &u_replay_ctrl);
     httpd_register_uri_handler(s_server, &u_log_clear);
