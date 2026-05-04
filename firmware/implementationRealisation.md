@@ -601,15 +601,15 @@ for the firmware lifetime.  This is the standard ESP-IDF pattern.
 
 ---
 
-## Phase 7 — Web Interface: Server + WebSocket ⚠️ Build-only (not yet flashed)
+## Phase 7 — Web Interface: Server + WebSocket ✅
 
 **Date completed**: 2026-05-04
 
-### Outcome: BUILD PASS — hardware verification pending
+### Outcome: PASS
 
-The firmware was built successfully and passed static analysis. It has **not yet
-been flashed to the target**. All findings and deviations below are based on
-code review and build output only.
+The firmware was built successfully. Hardware verification was completed
+together with the Phase 8 flash (see "Phase 7 — Hardware Verification" section
+below).
 
 ### Build metrics
 
@@ -718,11 +718,11 @@ at next flash.
 
 | Check | Result |
 |-------|--------|
-| Firmware flashed to Atom Lite | ⏳ Pending |
-| `http://192.168.4.1` loads in browser | ⏳ Pending |
-| WebSocket connects; status updates every ~1 s | ⏳ Pending |
-| Slider apply → value changes in Modbus response | ⏳ Pending |
-| Value persists after page reload (Phase 8) | ⏳ Pending |
+| Firmware flashed to Atom Lite | ✅ Pass — see Phase 7 Hardware Verification |
+| `http://192.168.4.1` loads in browser | ✅ Pass |
+| WebSocket connects; status updates every ~1 s | ✅ Pass |
+| Slider apply → value changes in Modbus response | ✅ Pass |
+| Value persists after page reload (Phase 8) | ✅ Pass |
 
 ### Deviations from plan
 
@@ -877,4 +877,144 @@ sub-headings.
 | NTP POST → ntp_synced badge turns green after 2 s | ✅ Pass |
 | Clear log → table empties | ✅ Pass |
 | Section header reads "System Settings"; WiFi is a grey sub-heading | ✅ Pass |
+
+---
+
+## Phase 7 — Hardware Verification ✅
+
+**Date completed**: 2026-05-04
+
+### Outcome: PASS
+
+Phase 7 build was flashed to hardware together with the Phase 8 firmware (both
+were verified in a single combined flash after Phase 8 code was complete — see
+Phase 8 below for build metrics).
+
+### Hardware verification results
+
+| Check | Result |
+|-------|--------|
+| Firmware flashed to Atom Lite (COM5, ESP32-PICO-D4, MAC 14:2b:2f:a0:b7:8c) | ✅ Pass |
+| SPIFFS image uploaded (`pio run -t uploadfs`) | ✅ Pass |
+| `http://192.168.4.1` loads full UI in browser (AP mode) | ✅ Pass |
+| WebSocket connects; status updates every ~1 s | ✅ Pass |
+| Slider apply → value changes in Modbus response | ✅ Pass |
+| All three Modbus frames answered correctly | ✅ Pass |
+
+### Findings
+
+#### AP mode vs STA mode showed different values in control panel
+
+When the device was accessed over STA (browser at `http://sensor-emulator.local`),
+the control panel showed HTML-default values (addr = 0, mode = Manual, all sliders
+at zero) instead of the values stored on the device.
+
+**Root cause**: `build_status_json()` did not include `fg.mode`, `fg.addr`,
+`s200.mode`, `s200.addr`, or `s200.heat` in the WebSocket push. The browser
+populated editable controls from their HTML `value=""` attributes (all zero).
+
+**Fix — firmware** (`web_server.cpp`): `build_status_json()` extended to include
+all five missing fields in every 1 Hz push.
+
+**Fix — web asset** (`data/app.js`): Added `wsInitialized` flag. On the **first**
+WebSocket message after connect, all editable controls (address inputs, mode
+radios, sliders, number inputs) are populated from the device state in that
+message. Subsequent pushes only refresh the read-only status display, so
+in-progress user edits are not overwritten.
+
+#### mDNS hostname renamed
+
+The mDNS hostname `"emulator"` was renamed to `"sensor-emulator"` during this
+verification phase, making the device reachable at **http://sensor-emulator.local**.
+The index.html hint text was updated to match.
+
+### Files changed (post-build hardware verification)
+
+| File | Change |
+|------|--------|
+| `sensorEmulator/wifi/wifi_manager.cpp` | `MDNS.begin("emulator")` → `MDNS.begin("sensor-emulator")` |
+| `sensorEmulator/web/web_server.cpp` | `build_status_json()` extended with `fg.mode`, `fg.addr`, `s200.mode`, `s200.addr`, `s200.heat` |
+| `firmware/data/app.js` | `wsInitialized` flag added; first-message control population |
+| `firmware/data/index.html` | Hint text `http://emulator.local` → `http://sensor-emulator.local` |
+
+---
+
+## Phase 8 — Manual Mode ✅
+
+**Date completed**: 2026-05-04
+
+### Outcome: PASS
+
+### Build metrics
+
+| Metric | Value |
+|--------|-------|
+| Build result | SUCCESS |
+| Compiler warnings | 0 |
+| RAM used | 14.6 % (47 764 / 327 680 bytes) |
+| Flash used | 69.2 % (906 649 / 1 310 720 bytes) |
+| Upload time | 9.1 s @ 1 500 000 baud |
+| Hardware | COM5, ESP32-PICO-D4, MAC 14:2b:2f:a0:b7:8c |
+
+### Findings
+
+#### Mode tasks are notification-driven, not polled
+
+The plan left the mode task wake-up mechanism open. The implementation uses
+`ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(5000))` — the task blocks until the
+web POST handler calls `fg6485a_mode_task_notify()` / `s200_mode_task_notify()`
+(which call `xTaskNotifyGive`). The 5 000 ms timeout acts as a safety wakeup
+in case a notification is ever missed.
+
+In MANUAL mode the task body is a no-op: the POST handler already wrote the
+clamped value directly into `g_sensor_state` under mutex before sending the
+notification. The task simply returns to its `ulTaskNotifyTake` wait after
+reading the current mode. This is intentional — the task exists as a dispatch
+skeleton for LIVE (Phase 10) and REPLAY (Phase 11).
+
+#### Task priority: `tskIDLE_PRIORITY + 1`
+
+Both mode tasks run at `tskIDLE_PRIORITY + 1` (priority 1). This is the lowest
+non-idle priority, ensuring they never preempt the Modbus slave task
+(`configMAX_PRIORITIES − 1`), the WiFi manager (priority 2), or the WebSocket
+push task (priority 1, but only active for the duration of a `httpd_queue_work`
+callback). No priority inversion was observed.
+
+#### No changes to modbus_slave_task
+
+`modbus_slave_task` reads `g_sensor_state` under mutex on every frame response.
+Since the POST handler writes to `g_sensor_state` under the same mutex, Modbus
+responses always reflect the latest applied value without any changes to the
+slave task.
+
+### Files created / changed
+
+| File | Change |
+|------|--------|
+| `sensorEmulator/tasks/fg6485a_mode_task.h` | New — `fg6485a_mode_task()` and `fg6485a_mode_task_notify()` declarations (`extern "C"`) |
+| `sensorEmulator/tasks/fg6485a_mode_task.cpp` | New — task body: `ulTaskNotifyTake` loop, mutex read of `fg_mode`, switch/case dispatch |
+| `sensorEmulator/tasks/s200_mode_task.h` | New — `s200_mode_task()` and `s200_mode_task_notify()` declarations (`extern "C"`) |
+| `sensorEmulator/tasks/s200_mode_task.cpp` | New — same pattern as fg6485a; reads `s200_mode` |
+| `sensorEmulator/web/web_server.cpp` | Added `#include` for both task headers; `handle_post_sensor()` calls notify at end of each sensor branch |
+| `sensorEmulator/main.cpp` | Phase 8 banner; added task includes; `xTaskCreate` for both tasks at `tskIDLE_PRIORITY + 1`, stack 2048 bytes |
+
+### Verification results
+
+| Check | Result |
+|-------|--------|
+| Firmware builds without errors or warnings | ✅ Pass |
+| Boot banner shows "Phase 8 Manual Mode" | ✅ Pass |
+| Set FG6485A temperature to 35.0 °C → Modbus FC03 reg 0x0001 returns 350 | ✅ Pass |
+| Reboot → value is 350 on first query (NVS persistence) | ✅ Pass |
+| POST temperature 999 → clamped to 1200 (120.0 °C); Modbus returns 1200 | ✅ Pass |
+| POST humidity −1 → clamped to 0 | ✅ Pass |
+| All three Modbus frames answered correctly after value change | ✅ Pass |
+| No WDT crash, no panic, stable over multiple poll cycles | ✅ Pass |
+
+### Deviations from plan
+
+| Plan item | Deviation |
+|-----------|-----------|
+| Mode task wake-up mechanism unspecified | Implemented as `xTaskNotifyGive` / `ulTaskNotifyTake` (direct-to-task notification). Chosen over a queue because only one bit of information is needed: "something changed". |
+| Tasks listed as `ntp_task.cpp` only in the source tree | Two additional task files created: `fg6485a_mode_task.h/.cpp` and `s200_mode_task.h/.cpp` — headers were added alongside the `.cpp` files to allow other translation units to call the notify API cleanly. |
 

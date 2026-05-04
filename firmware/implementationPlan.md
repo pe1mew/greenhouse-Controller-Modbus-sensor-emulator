@@ -181,7 +181,7 @@ Apply; survive reboot.
 - [x] If NVS contains SSID + password, attempt STA connect concurrently.
 - [x] On STA connect event:
   - Stop AP (`WiFi.softAPdisconnect(true)`).
-  - Initialise mDNS, set hostname `emulator`, service type `_http._tcp` port 80.
+  - Initialise mDNS, set hostname `sensor-emulator`, service type `_http._tcp` port 80.
 - [x] On STA disconnect: restart AP, re-expose config page.
 - [x] Expose `wifi_manager_connect(ssid, pass)` for web interface POST handler.
 - [x] Event bits in a FreeRTOS EventGroup: `WIFI_STA_CONNECTED`, `WIFI_STA_DISCONNECTED` — used by NTP task and live-fetch task.
@@ -189,7 +189,7 @@ Apply; survive reboot.
 ### Verification
 - [x] Power on with no NVS credentials → SSID `SensorEmulator-B78D` visible.
 - [x] AP `192.168.4.1` starts immediately on boot.
-- [x] NVS credentials stored → STA connects (`192.168.20.226`), AP disappears, `emulator.local` registered.
+- [x] NVS credentials stored → STA connects (`192.168.20.226`), AP disappears, `sensor-emulator.local` registered.
 - [x] `WIFI_EVT_STA_CONNECTED` EventGroup bit set after connect.
 - [x] Duplicate GOT_IP guard prevents ASSOC_LEAVE disconnect loop.
 
@@ -270,6 +270,8 @@ responses; changes survive reboot.
       (5 s safety timeout) fed by the web POST handler notify calls.
 
 ### Verification
+- Build: ✅ SUCCESS — Flash 69.2 % (906 KB), RAM 14.6 % (47 KB), 0 errors, 0 warnings.
+- Flashed to hardware (COM5, ESP32-PICO-D4, MAC 14:2b:2f:a0:b7:8c). ✅
 - Set FG6485A temperature to 35.0 °C (raw 350) via web UI → Modbus FC03
   read of reg `0x0001` returns 350. ✅
 - Reboot → value is 350 on first query (NVS persistence). ✅
@@ -452,7 +454,7 @@ firmware/
 │   ├── index.html
 │   ├── style.css
 │   └── app.js
-└── src/
+└── sensorEmulator/
     ├── main.cpp
     ├── hal/
     │   ├── led.h / led.cpp
@@ -462,7 +464,7 @@ firmware/
     │   ├── modbus_slave.h / modbus_slave.cpp
     │   └── modbus_log.h / modbus_log.cpp
     ├── sensors/
-    │   ├── sensor_state.h
+    │   ├── sensor_state.h / sensor_state.cpp
     │   ├── fg6485a_slave.h / fg6485a_slave.cpp
     │   └── s200_slave.h / s200_slave.cpp
     ├── config/
@@ -474,11 +476,11 @@ firmware/
     ├── web/
     │   └── web_server.h / web_server.cpp
     ├── tasks/
-    │   ├── fg6485a_mode_task.cpp
-    │   ├── s200_mode_task.cpp
-    │   ├── ntp_task.cpp
-    │   ├── live_fetch_task.cpp
-    │   └── replay_task.cpp
+    │   ├── fg6485a_mode_task.h / fg6485a_mode_task.cpp   ← Phase 8 ✅
+    │   ├── s200_mode_task.h / s200_mode_task.cpp         ← Phase 8 ✅
+    │   ├── ntp_task.h / ntp_task.cpp
+    │   ├── live_fetch_task.h / live_fetch_task.cpp
+    │   └── replay_task.h / replay_task.cpp
     └── util/
         └── csv_parser.h / csv_parser.cpp
 ```

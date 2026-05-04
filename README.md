@@ -124,7 +124,7 @@ See [webMock/README.md](webMock/README.md) for full details.
 
 On first boot the device starts as an open WiFi access point named `SensorEmulator-AABB` (AABB = last two bytes of the WiFi MAC address in hex). Connect to that AP and navigate to `http://192.168.4.1` to open the web interface and configure WiFi, time, and sensor modes.
 
-Once connected to a WiFi network the web interface is also reachable at `http://emulator.local`.
+Once connected to a WiFi network the web interface is also reachable at `http://sensor-emulator.local`.
 
 ## Design
 

@@ -6,6 +6,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ---
 
+## [0.8.0] — 2026-05-04  Phase 8 — Manual Mode Tasks
+
+### Added — firmware (`firmware/sensorEmulator/`)
+- `tasks/fg6485a_mode_task.h` / `tasks/fg6485a_mode_task.cpp` — FreeRTOS task
+  that dispatches mode logic for the FG6485A sensor.  Blocks on
+  `ulTaskNotifyTake` (5 s safety timeout) and is woken by the web POST handler
+  via `fg6485a_mode_task_notify()` after every sensor-config change.  In
+  MANUAL mode the task is idle — the POST handler already writes
+  `sensor_state` directly.  Scaffolding for LIVE (Phase 10) and REPLAY
+  (Phase 11) modes is present.
+- `tasks/s200_mode_task.h` / `tasks/s200_mode_task.cpp` — identical pattern for
+  the S200 sensor, reading `g_sensor_state.s200_mode`.
+- `main.cpp` — starts both mode tasks at `tskIDLE_PRIORITY + 1`, 2 KiB stack
+  each, after `web_server_init()`.
+- `web/web_server.cpp` — `handle_post_sensor()` calls
+  `fg6485a_mode_task_notify()` / `s200_mode_task_notify()` at the end of
+  each sensor branch.
+
+### Verified
+- Build: SUCCESS (Flash 69.1 %, RAM 14.6 %).
+- Flashed to hardware (COM5, ESP32-PICO-D4, MAC 14:2b:2f:a0:b7:8c).
+- Set FG6485A temperature to 35.0 °C → Modbus FC03 reg `0x0001` returns 350.
+- Reboot → value is 350 on first query (NVS persistence confirmed).
+
+---
+
 ## [0.7.2] — 2026-05-04  mDNS rename · WebSocket state-sync · Doxygen clean
 
 ### Fixed — firmware (`firmware/sensorEmulator/`)
