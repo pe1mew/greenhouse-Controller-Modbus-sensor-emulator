@@ -49,7 +49,7 @@
 /** @brief WebSocket push interval in milliseconds. */
 static constexpr size_t  WS_PUSH_INTERVAL_MS = 1000;
 /** @brief Stack size in bytes for the WS push task. */
-static constexpr size_t  WS_PUSH_STACK        = 4096;
+static constexpr size_t  WS_PUSH_STACK        = 8192;
 /** @brief Maximum HTTP request body size in bytes. */
 static constexpr size_t  HTTP_BODY_MAX         = 512;
 /** @brief Maximum size of a status JSON frame in bytes. */

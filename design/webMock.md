@@ -18,9 +18,9 @@ without flashing any firmware.
 | `POST /config/wifi` | Accepts and logs; updates simulated WiFi state |
 | `POST /config/time` | Parses ISO-8601, updates simulated clock offset |
 | `POST /config/ntp` | Saves NTP server name in in-process settings dict |
-| `POST /replay/upload` | Returns `501 Not Implemented` (matches Phase 11 stub) |
-| `POST /replay/control` | Returns `501 Not Implemented` (matches Phase 11 stub) |
-| `POST /log/clear` | Broadcasts `{type:"log_clear"}` WS message |
+| `POST /replay/upload` | Stores upload in memory; returns `{ok:true, size:N}` |
+| `POST /replay/control` | Simulates start/stop; updates `replay_state` in `_state` |
+| `POST /log/clear` | Clears in-memory log queue; broadcasts `{type:"log_clear"}` WS message |
 | 1 Hz simulated log entries | Pushes a fake `{type:"log", …}` frame to exercise UI log table |
 
 What is **not** mocked: actual Modbus RS485 traffic, NVS persistence across
@@ -94,8 +94,20 @@ _state = {
     "time_offset_s":  0,           # seconds added to time.time() for manual-set simulation
     "ntp_synced":     False,
     "ntp_server":     "pool.ntp.org",
+    # Replay (Phase 11)
+    "replay_state":   "idle",      # idle | running | done | error
+    "replay_row":     0,
+    # Live fetch (Phase 10)
+    "live_lat":       52.37,
+    "live_lon":        4.90,
+    "live_fetch_age": 0,
+    "live_fetch_ok":  False,
 }
 _state_lock = threading.Lock()
+
+# In-memory simulated Modbus log queue (Phase 12)
+_log_queue: list[dict] = []
+_log_queue_lock = threading.Lock()
 ```
 
 ---
@@ -213,20 +225,30 @@ def build_status_json() -> str:
         s = dict(_state)
 
     now = time.time() + s['time_offset_s']
-    time_str = datetime.utcfromtimestamp(now).strftime('%Y-%m-%dT%H:%M:%S') \
+    time_str = datetime.fromtimestamp(now).strftime('%Y-%m-%dT%H:%M:%S') \
                if now > 1577836800 else ''
 
     return json.dumps({
         'type': 'status',
         'fg':   { 'temp': s['fg_temp_raw'] / 10.0,
-                  'hum':  s['fg_hum_raw']  / 10.0 },
+                  'hum':  s['fg_hum_raw']  / 10.0,
+                  'mode': s['fg_mode'],
+                  'addr': s['fg_addr'] },
         's200': { 'spd':  s['s200_spd_raw']  / 1000.0,
-                  'dir':  s['s200_dir_raw']   / 1000.0 },
+                  'dir':  s['s200_dir_raw']   / 1000.0,
+                  'heat': s['s200_heat_raw']  / 1000.0,
+                  'mode': s['s200_mode'],
+                  'addr': s['s200_addr'] },
         'wifi': { 'mode': s['wifi_mode'],
                   'ip':   s['wifi_ip'],
-                  'rssi': s['wifi_rssi'] },
-        'time':       time_str,
-        'ntp_synced': s['ntp_synced'],
+                  'rssi': s['wifi_rssi'],
+                  'ssid': s['wifi_ssid'] },
+        'time':           time_str,
+        'ntp_synced':     s['ntp_synced'],
+        'live':           { 'lat': s['live_lat'], 'lon': s['live_lon'] },
+        'live_fetch_age': s['live_fetch_age'],
+        'live_fetch_ok':  s['live_fetch_ok'],
+        'replay':         { 'state': s['replay_state'], 'row': s['replay_row'] },
     })
 ```
 
@@ -238,9 +260,16 @@ Pushed once every 5 ticks:
 def maybe_push_fake_log():
     if int(time.time()) % 5 != 0:
         return
+    # First drain the in-memory log queue (populated by simulated Modbus activity).
+    with _log_queue_lock:
+        pending = list(_log_queue)
+        _log_queue.clear()
+    for entry in pending:
+        ws_broadcast(json.dumps(entry))
+    # Also push a synthetic entry to exercise the UI table.
     entry = json.dumps({
         'type':    'log',
-        'ts':      datetime.utcnow().strftime('%H:%M:%S'),
+        'ts':      datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
         'dir':     'RX',
         'hex':     '01 03 00 00 00 02 C4 0B',
         'summary': 'FC03 addr=1 reg=0x0000 n=2',
@@ -324,21 +353,83 @@ after 2 s set `_state['ntp_synced'] = True`.
 
 ## 12  POST `/replay/upload` and `/replay/control`
 
-Both return:
-```
-HTTP 501 Not Implemented
-{ "error": "not implemented" }
+Phase 11 is complete; the mock now simulates the real behaviour.
+
+### `/replay/upload`
+
+**Processing**: Read `request.data` (raw body); store byte count in
+`_state['replay_row'] = 0`; reset `replay_state` to `"idle"`.
+
+**Response**: `{ "ok": true, "size": <bytes> }`
+
+```python
+@app.route('/replay/upload', methods=['POST'])
+def replay_upload():
+    size = len(request.data)
+    with _state_lock:
+        _state['replay_state'] = 'idle'
+        _state['replay_row']   = 0
+    return jsonify(ok=True, size=size)
 ```
 
-Mirrors the Phase 11 stubs in the firmware.
+### `/replay/control`
+
+**Request**: `{ "action": "start" | "stop" }`
+
+**Processing**:
+- `"start"` → set `replay_state` to `"running"`, launch a `threading.Thread`
+  that increments `replay_row` once per second and eventually sets
+  `replay_state` to `"done"` after 10 ticks (simulating playback progress).
+- `"stop"` → set `replay_state` to `"idle"`, `replay_row` to 0.
+
+**Response**: `{ "ok": true, "state": "running" | "idle" }`
+
+```python
+@app.route('/replay/control', methods=['POST'])
+def replay_control():
+    body = request.get_json(force=True, silent=True) or {}
+    action = body.get('action', '')
+    with _state_lock:
+        if action == 'start':
+            _state['replay_state'] = 'running'
+            _state['replay_row']   = 0
+            threading.Thread(target=_replay_sim, daemon=True).start()
+        elif action == 'stop':
+            _state['replay_state'] = 'idle'
+            _state['replay_row']   = 0
+        state = _state['replay_state']
+    return jsonify(ok=True, state=state)
+
+def _replay_sim():
+    """Simulate CSV playback: advance row every second, stop after 10 rows."""
+    for row in range(1, 11):
+        time.sleep(1)
+        with _state_lock:
+            if _state['replay_state'] != 'running':
+                return
+            _state['replay_row'] = row
+    with _state_lock:
+        if _state['replay_state'] == 'running':
+            _state['replay_state'] = 'done'
+```
 
 ---
 
 ## 13  POST `/log/clear`
 
-**Processing**: Broadcast `{ "type": "log_clear" }` to all WebSocket clients.
+**Processing**: Clear the in-memory `_log_queue`, then broadcast
+`{ "type": "log_clear" }` to all WebSocket clients.
 
 **Response**: `{ "ok": true }`
+
+```python
+@app.route('/log/clear', methods=['POST'])
+def log_clear():
+    with _log_queue_lock:
+        _log_queue.clear()
+    ws_broadcast(json.dumps({'type': 'log_clear'}))
+    return jsonify(ok=True)
+```
 
 ---
 
@@ -408,7 +499,8 @@ Open http://127.0.0.1:5000 in a browser.
 - State is in-memory only; it resets on restart.
 - WiFi connect is simulated with a 3-second delay.
 - NTP sync is simulated with a 2-second delay after POST /config/ntp.
-- /replay/upload and /replay/control return 501 (Phase 11 stubs).
+- /replay/upload accepts any body; /replay/control simulates 10-row playback (1 row/s).
+- Log entries are synthetic (pushed every 5 s); POST /log/clear empties the in-memory queue.
 ```
 
 ---
@@ -421,8 +513,9 @@ Open http://127.0.0.1:5000 in a browser.
 | WiFi connect | Real 802.11 association | Simulated 3 s timer |
 | NTP sync | Real SNTP via internet | Simulated 2 s delay |
 | Time after `POST /config/time` | `settimeofday()` | Offset added to `time.time()` |
-| Log entries | Real Modbus RX/TX | Synthetic fake entries every 5 s |
-| Replay / Live mode | Phase 11/10 stubs | Same 501 stub |
+| Log entries | Real Modbus RX/TX | Synthetic fake entries every 5 s; cleared by `_log_queue.clear()` on POST `/log/clear` |
+| Replay playback | Real CSV file from SPIFFS | Simulated 10-row counter (1 row/s); no actual CSV parsing |
+| Live fetch | Real Open-Meteo HTTPS call | `live_fetch_age` / `live_fetch_ok` static in `_state` |
 | RSSI | Real radio measurement | Fixed −55 dBm after simulated connect |
 
 ---
