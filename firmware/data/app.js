@@ -32,11 +32,11 @@ function wsConnect() {
 function handleStatus(s) {
   if (s.fg) {
     setText('st-fg-temp', s.fg.temp !== undefined ? s.fg.temp.toFixed(1) : '—');
-    setText('st-fg-hum',  s.fg.hum  !== undefined ? s.fg.hum.toFixed(1)  : '—');
+    setText('st-fg-hum',  s.fg.hum  !== undefined ? s.fg.hum.toFixed(0)  : '—');
   }
   if (s.s200) {
-    setText('st-s200-spd', s.s200.spd !== undefined ? s.s200.spd.toFixed(3) : '—');
-    setText('st-s200-dir', s.s200.dir !== undefined ? s.s200.dir.toFixed(3) : '—');
+    setText('st-s200-spd', s.s200.spd !== undefined ? s.s200.spd.toFixed(0) : '—');
+    setText('st-s200-dir', s.s200.dir !== undefined ? s.s200.dir.toFixed(0) : '—');
   }
   if (s.wifi) {
     setText('st-wifi-mode', s.wifi.mode || '—');
@@ -97,7 +97,7 @@ function postFgAddr() {
 function postFgManual() {
   const mode = Number(document.querySelector('input[name="fg-mode"]:checked').value);
   const temp = parseFloat(document.getElementById('fg-temp-in').value);
-  const hum  = parseFloat(document.getElementById('fg-hum-in').value);
+  const hum  = parseInt(document.getElementById('fg-hum-in').value, 10);
   post('/config/sensor', { sensor: 'fg6485a', mode, temp, hum }).then(r => {
     if (!r) return;
     if (r.temp !== undefined) setSliderInput('fg-temp-sl', 'fg-temp-in', r.temp);
@@ -113,8 +113,8 @@ function postS200Addr() {
 
 function postS200Manual() {
   const mode = Number(document.querySelector('input[name="s200-mode"]:checked').value);
-  const spd  = parseFloat(document.getElementById('s200-spd-in').value);
-  const dir  = parseFloat(document.getElementById('s200-dir-in').value);
+  const spd  = parseInt(document.getElementById('s200-spd-in').value, 10);
+  const dir  = parseInt(document.getElementById('s200-dir-in').value, 10);
   const heat = parseFloat(document.getElementById('s200-heat-in').value);
   post('/config/sensor', { sensor: 's200', mode, spd, dir, heat }).then(r => {
     if (!r) return;
@@ -189,5 +189,51 @@ function esc(str) {
     .replace(/>/g, '&gt;');
 }
 
+// ── Resizable log columns ────────────────────────────────────────────────
+function initResizableCols() {
+  const table = document.getElementById('log-tbl');
+  if (!table) return;
+
+  // Fixed layout so explicit widths are respected.
+  table.style.tableLayout = 'fixed';
+
+  // Fallback initial widths (px) when offsetWidth is unavailable (e.g. hidden table).
+  const defaults = [70, 45, 300, 200];
+  const ths = table.querySelectorAll('thead th');
+
+  // Columns 0 (Time) and 1 (Dir) are fixed-width via CSS; only make the rest resizable.
+  const FIXED_COLS = 2;
+
+  ths.forEach(function (th, i) {
+    th.style.width = (th.offsetWidth || defaults[i]) + 'px';
+    if (i < FIXED_COLS) return;   // skip resizer for fixed columns
+
+    const handle = document.createElement('div');
+    handle.className = 'col-resizer';
+    th.appendChild(handle);
+
+    var startX, startW;
+
+    handle.addEventListener('mousedown', function (e) {
+      startX = e.clientX;
+      startW = th.offsetWidth;
+      handle.classList.add('dragging');
+      e.preventDefault();
+
+      function onMove(e) {
+        th.style.width = Math.max(40, startW + e.clientX - startX) + 'px';
+      }
+      function onUp() {
+        handle.classList.remove('dragging');
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup',   onUp);
+      }
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup',   onUp);
+    });
+  });
+}
+
 // ── Boot ─────────────────────────────────────────────────────────────────
 wsConnect();
+initResizableCols();

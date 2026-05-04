@@ -71,8 +71,8 @@
     </div>
     <div class="slider-row">
       <label>Humidity (%RH)</label>
-      <input type="range"  id="fg-hum-sl"  min="0"   max="99.9" step="0.1" value="50">
-      <input type="number" id="fg-hum-in"  min="0"   max="99.9" step="0.1" value="50" class="short">
+      <input type="range"  id="fg-hum-sl"  min="0"   max="99" step="1" value="50">
+      <input type="number" id="fg-hum-in"  min="0"   max="99" step="1" value="50" class="short">
     </div>
     <button onclick="postFgManual()">Apply</button>
   </div>
@@ -98,26 +98,28 @@
   <div id="s200-manual">
     <div class="slider-row">
       <label>Wind speed (m/s)</label>
-      <input type="range"  id="s200-spd-sl"  min="0"   max="60"  step="0.001" value="5">
-      <input type="number" id="s200-spd-in"  min="0"   max="60"  step="0.001" value="5"   class="short">
+      <input type="range"  id="s200-spd-sl"  min="0"   max="60"  step="1"   value="5">
+      <input type="number" id="s200-spd-in"  min="0"   max="60"  step="1"   value="5"   class="short">
     </div>
     <div class="slider-row">
       <label>Wind direction (°)</label>
-      <input type="range"  id="s200-dir-sl"  min="0"   max="360" step="0.001" value="180">
-      <input type="number" id="s200-dir-in"  min="0"   max="360" step="0.001" value="180" class="short">
+      <input type="range"  id="s200-dir-sl"  min="0"   max="360" step="1"   value="180">
+      <input type="number" id="s200-dir-in"  min="0"   max="360" step="1"   value="180" class="short">
     </div>
     <div class="slider-row">
       <label>Heating temp (°C)</label>
-      <input type="range"  id="s200-heat-sl" min="-40" max="85"  step="0.001" value="25">
-      <input type="number" id="s200-heat-in" min="-40" max="85"  step="0.001" value="25"  class="short">
+      <input type="range"  id="s200-heat-sl" min="-40" max="85"  step="0.1" value="25">
+      <input type="number" id="s200-heat-in" min="-40" max="85"  step="0.1" value="25"  class="short">
     </div>
     <button onclick="postS200Manual()">Apply</button>
   </div>
 </section>
 
-<!-- ── WiFi / NTP / Time ────────────────────────────────────────── -->
+<!-- ── System Settings ──────────────────────────────────────────── -->
 <section>
-  <h2>WiFi Settings</h2>
+  <h2>System Settings</h2>
+
+  <h3>WiFi</h3>
   <div class="row">
     <label>SSID</label>
     <input type="text"     id="wifi-ssid" maxlength="32" class="wide">

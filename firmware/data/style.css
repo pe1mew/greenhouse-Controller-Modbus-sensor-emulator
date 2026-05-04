@@ -161,5 +161,26 @@ code { background: #0d1b2a; padding: 1px 4px; border-radius: 3px; }
   background: var(--accent);
   position: sticky;
   top: 0;
+  overflow: hidden;
+  white-space: nowrap;
 }
+
+/* ── Column resize handle ────────────────────────────────────────── */
+.col-resizer {
+  position: absolute;
+  right: 0;
+  top: 0;
+  height: 100%;
+  width: 5px;
+  cursor: col-resize;
+  user-select: none;
+  background: transparent;
+}
+.col-resizer:hover,
+.col-resizer.dragging {
+  background: rgba(255,255,255,.25);
+}
+#log-tbl th:nth-child(1), #log-tbl td:nth-child(1) { width: 72px;  min-width: 72px;  max-width: 72px; }
+#log-tbl th:nth-child(2), #log-tbl td:nth-child(2) { width: 42px;  min-width: 42px;  max-width: 42px; }
+
 #log-tbl tr:nth-child(even) { background: rgba(255,255,255,.03); }
