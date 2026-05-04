@@ -199,3 +199,343 @@ The loop was removed.
 | `taskYIELD()` used for polling in `rs485_read_frame()` | Changed to `vTaskDelay(1)` (1 tick) — `taskYIELD()` and `vTaskDelay(pdMS_TO_TICKS(1))` both fail to yield at max priority on ESP-IDF 100 Hz tick rate. |
 | `RS485_FRAME_TIMEOUT_MS = 5` | Raised to 20 ms — must exceed one tick period (10 ms) to avoid premature frame termination when the FIFO is momentarily empty between back-to-back bytes. |
 | `rs485_write()` described as "write + drain echo" | Echo drain removed — hardware confirmed to produce no self-echo (Phase 1). |
+
+---
+
+## Phase 3 — FG6485A Emulation ✅
+
+**Date completed**: 2026-05-04
+
+### Outcome: PASS
+
+### Serial log evidence (first poll after flash)
+
+```
+11:08:46.132 > [modbus] RX → 01 03 00 00 00 02 C4 0B
+11:08:46.148 > [fg6485a] FC03 reg=0x0000 qty=2 → 01F4 00FA
+11:08:46.148 > [modbus] TX → 01 03 04 01 F4 00 FA 3A 7E
+11:08:46.244 > [modbus] RX → 2C 04 00 08 00 0C 77 B0
+11:08:46.260 > [modbus] FC 0x04 not handled → exception 0x01
+11:08:46.260 > [modbus] TX → 2C 84 01 12 C9
+11:08:46.380 > [modbus] RX → 2C 04 00 08 00 0C 77 B0   ← master retry
+11:08:46.396 > [modbus] FC 0x04 not handled → exception 0x01
+11:08:46.396 > [modbus] TX → 2C 84 01 12 C9
+```
+
+Frame decode:
+- Request `01 03 00 00 00 02 C4 0B` — FC03, addr 1, reg 0x0000, qty 2. CRC `C4 0B` ✅
+- Response `01 03 04 01 F4 00 FA 3A 7E` — byte count 4, reg[0]=`01F4`=500 (50.0 %RH), reg[1]=`00FA`=250 (25.0 °C). CRC `3A 7E` ✅
+- **Master did not retry the FG6485A frame** — accepted the valid response on the first attempt. ✅
+- S200 (addr 44, FC04) still returning exception 0x01 as expected (Phase 4 not yet implemented).
+
+### Findings
+
+#### No surprises — architecture from Phase 2 handled Phase 3 with no structural changes
+
+The handler table and dispatch mechanism built in Phase 2 (`modbus_register_handler` /
+`modbus_slave_task`) worked exactly as designed. Registering two new handlers
+(`fg6485a_fc03` and `fg6485a_fc16` for addr 1) was the entire integration
+surface.
+
+#### Mutex ownership pattern: validate outside, read/write inside
+
+The FC03 handler performs a dry-run `read_register()` call for every
+requested register address *before* taking the mutex — this checks range
+validity without holding the lock. Only once all registers are confirmed
+reachable does the handler take the mutex and execute the actual reads.
+This avoids holding the mutex across an exception path and keeps the
+critical section as short as possible.
+
+The same pattern is applied in FC16: all target registers are validated by
+attempting a dummy write (value 0) before the mutex is taken; the actual
+writes occur inside the critical section.
+
+#### FC16 validation uses a dummy write, not a separate range check
+
+Rather than duplicating register-address validation logic in a separate
+`is_writable(reg)` predicate, the FC16 handler calls `write_register(reg, 0)`
+in the pre-validation loop. `write_register` returns `false` for any
+unknown address. Using the actual write function as the validator ensures
+the validation and execution paths can never diverge if the register map
+changes later.
+
+#### `sensor_state_t` stores int32 S200 fields now, used only in Phase 4
+
+All S200 fields (`s200_dir_*`, `s200_spd_*`, `s200_heat_*`) are already
+present in `sensor_state_t` with Phase 4 defaults. They are initialised by
+`sensor_state_init()` but not yet accessed by any handler. This means Phase 4
+only needs to add the S200 handler files and register them — no changes to
+`sensor_state.h/cpp` are expected.
+
+### Files created / changed
+
+| File | Change |
+|------|--------|
+| `sensorEmulator/sensors/sensor_state.h` | New — `sensor_state_t` struct (FG6485A + S200 fields, FreeRTOS mutex) |
+| `sensorEmulator/sensors/sensor_state.cpp` | New — `sensor_state_init()` with power-on defaults |
+| `sensorEmulator/sensors/fg6485a_slave.h` | New — `fg6485a_slave_register()` declaration |
+| `sensorEmulator/sensors/fg6485a_slave.cpp` | New — `read_register()`, `write_register()`, `fg6485a_fc03()`, `fg6485a_fc16()` |
+| `sensorEmulator/main.cpp` | Updated — Phase 3 banner; `sensor_state_init()` and `fg6485a_slave_register(1)` added to `setup()` |
+
+### Build metrics
+
+| Metric | Value |
+|--------|-------|
+| Build result | SUCCESS |
+| Compiler warnings | 0 |
+| RAM used | 23 992 B / 327 680 B (7.3 %) |
+| Flash used | 293 869 B / 1 310 720 B (22.4 %) |
+| Upload time | 13.4 s @ 1 500 000 baud |
+
+### Verification results
+
+| Check | Result |
+|-------|--------|
+| Firmware builds without errors or warnings | ✅ Pass |
+| Boot banner shows "Phase 3 FG6485A" | ✅ Pass |
+| `[fg6485a] handlers registered for addr 1` printed on boot | ✅ Pass |
+| FC03 reg 0x0000–0x0001 → 01F4 00FA (50.0 %RH, 25.0 °C) | ✅ Pass |
+| Response CRC `3A 7E` correct | ✅ Pass |
+| Master accepts response without retry | ✅ Pass |
+| S200 FC04 addr 44 still returns exception 0x01 (Phase 4 pending) | ✅ Pass |
+| No WDT crash, no panic, stable over multiple 60 s poll cycles | ✅ Pass |
+
+### Deviations from plan
+
+| Plan item | Deviation |
+|-----------|-----------|
+| `sensor_state.h` listed as the only new shared-state file | `sensor_state.cpp` also created (global definition of `g_sensor_state` and `sensor_state_init()` — cannot be header-only due to FreeRTOS mutex initialisation at runtime). |
+| Registers 0x001D–0x001E described as "not readable (exception 0x02)" in FC03 | Confirmed correct — `read_register()` returns `false` for those addresses, triggering exception 0x02. Not tested by live master (master only queries 0x0000–0x0001). |
+
+---
+
+## Phase 4 — S200 Emulation ✅
+
+**Date completed**: 2026-05-04
+
+### Outcome: PASS
+
+### Serial log evidence (first poll after flash)
+
+```
+11:18:49.732 > [modbus] RX → 01 03 00 00 00 02 C4 0B
+11:18:49.732 > [fg6485a] FC03 reg=0x0000 qty=2 → 01F4 00FA
+11:18:49.732 > [modbus] TX → 01 03 04 01 F4 00 FA 3A 7E
+11:18:49.832 > [modbus] RX → 2C 04 00 08 00 0C 77 B0
+11:18:49.852 > [s200] FC04 reg=0x0008 qty=12 → 0002 BF20 0002 BF20 0002 BF20 0000 1388 0000 1388 0000 1388
+11:18:49.852 > [modbus] TX → 2C 04 18 00 02 BF 20 00 02 BF 20 00 02 BF 20 00 00 13 88 00 00 13 88 00 00 13 88 16 04
+11:18:49.966 > [modbus] RX → 2C 04 00 1C 00 02 B6 70
+11:18:49.997 > [s200] FC04 reg=0x001C qty=2 → 0000 61A8
+11:18:49.997 > [modbus] TX → 2C 04 04 00 00 61 A8 2E A8
+```
+
+Frame decode:
+- `2C 04 00 08 00 0C 77 B0` — FC04, addr 44, reg 0x0008, qty 12. CRC `77 B0` ✅
+- Response 24-byte payload decoded as 6 × int32 (big-endian word order):
+  - `0x0002BF20` = 180 000 → 180.000° dir_min ✅
+  - `0x0002BF20` = 180 000 → 180.000° dir_max ✅
+  - `0x0002BF20` = 180 000 → 180.000° dir_avg ✅
+  - `0x00001388` = 5 000 → 5.000 m/s spd_min ✅
+  - `0x00001388` = 5 000 → 5.000 m/s spd_max ✅
+  - `0x00001388` = 5 000 → 5.000 m/s spd_avg ✅
+  - Response CRC `16 04` ✅
+- `2C 04 00 1C 00 02 B6 70` — FC04, addr 44, reg 0x001C, qty 2 (heater). CRC `B6 70` ✅
+- Response: `0x000061A8` = 25 000 → 25.000 °C heat_high. CRC `2E A8` ✅
+- **Master now sends Frame 3** (heater query) — it was suppressed in Phases 2–3 because Frame 2 returned an exception; once Frame 2 returned a valid response, Frame 3 was also sent. ✅
+- Both sensors respond in the same poll cycle with no interference. ✅
+- Master does not retry either frame (valid responses accepted first time). ✅
+
+### Findings
+
+#### Master Frame 3 (heater, reg 0x001C) was latent
+
+During Phases 2 and 3 the master never sent Frame 3. It turns out the master's
+logic is conditional: Frame 3 is only issued when Frame 2 (S200 wind data) returns
+a successful response. While Frame 2 was returning exception 0x01 the master
+skipped Frame 3 entirely. Phase 4 was therefore the first time the heater query
+was seen — `2C 04 00 1C 00 02 B6 70`. The handler served it correctly using the
+`s200_heat_high` field (default 25 000 = 25.000 °C).
+
+#### int32 big-endian word split must avoid C signed right-shift
+
+Extracting the high and low 16-bit words of an int32 value requires care. For
+negative values, a plain `val >> 16` performs arithmetic (sign-extending) right
+shift — the result is still correct after truncation to `uint16_t`, but the
+intermediate value is unexpected. The implementation casts to `uint32_t` before
+shifting: `(uint16_t)(((uint32_t)(v)) >> 16)` for the high word and
+`(uint16_t)((uint32_t)(v) & 0xFFFFu)` for the low word. This produces the correct
+two's-complement big-endian representation for all signed int32 values.
+
+#### S200 fields were pre-populated in sensor_state from Phase 3
+
+All S200 fields in `sensor_state_t` and their default values were established
+during Phase 3 (S200 fields visible in `sensor_state.h` and initialised in
+`sensor_state_init()`). Phase 4 required no changes to those files — only the
+two new handler files and the `main.cpp` wiring.
+
+### Files created / changed
+
+| File | Change |
+|------|--------|
+| `sensorEmulator/sensors/s200_slave.h` | New — `s200_slave_register()` declaration |
+| `sensorEmulator/sensors/s200_slave.cpp` | New — `read_fc04_register()`, `read_fc03_register()`, `s200_fc04()`, `s200_fc03()` |
+| `sensorEmulator/main.cpp` | Updated — Phase 4 banner; `s200_slave_register(44)` added to `setup()` |
+
+### Build metrics
+
+| Metric | Value |
+|--------|-------|
+| Build result | SUCCESS |
+| Compiler warnings | 0 |
+| RAM used | 7.3 % (unchanged from Phase 3) |
+| Flash used | 22.4 % (unchanged from Phase 3) |
+
+### Verification results
+
+| Check | Result |
+|-------|--------|
+| Firmware builds without errors or warnings | ✅ Pass |
+| Boot banner shows "Phase 4 S200" | ✅ Pass |
+| `[s200] handlers registered for addr 44` printed on boot | ✅ Pass |
+| FC04 reg 0x0008 qty 12 → 6 int32 words (wind dir + speed defaults) | ✅ Pass |
+| Response CRC `16 04` correct | ✅ Pass |
+| FC04 reg 0x001C qty 2 → heat_high 25 000 (25.000 °C) | ✅ Pass |
+| Response CRC `2E A8` correct | ✅ Pass |
+| Frame 3 (heater) now sent by master after Frame 2 success | ✅ Pass |
+| FG6485A FC03 still returns correct values in same poll cycle | ✅ Pass |
+| Master accepts all responses without retry | ✅ Pass |
+| No WDT crash, no panic, stable over multiple poll cycles | ✅ Pass |
+
+### Deviations from plan
+
+| Plan item | Deviation |
+|-----------|-----------|
+| Plan referenced `0x0008–0x001D` as FC04 range | Register 0x001D is the low word of `heat_high` (0x001C–0x001D). The handler serves 0x001C–0x001F (heat_high + heat_low), covering all int32 pairs completely. This matches the actual S200 register map — the plan's end address was inclusive of the high word only. |
+| FC03 config read was listed as a Phase 4 task | Implemented (handlers for 0x1000/0x1001 registered). Not exercised by the live master (master only uses FC04); will be tested in Phase 13 (IT-xx). |
+
+---
+
+## Phase 5 — NVS Settings ✅
+
+### Summary
+
+All configurable values (slave addresses, manual register values, sensor modes,
+WiFi credentials, NTP server, live lat/lon, replay file path) are persisted
+in the ESP-IDF NVS flash partition under the namespace `"emulator"`.  On first
+boot the getters return hardcoded defaults identical to the Phase 4 values.
+After a `nvs_cfg_set_*` call the new value survives firmware reflash and power
+cycles.
+
+### Serial log evidence
+
+**Boot 1 — fresh NVS (first flash after NVS erase):**
+```
+[nvs] namespace 'emulator' opened
+
+================================================
+  Modbus Sensor Emulator — Phase 5 NVS Settings
+  M5Stack Atom Lite + Atomic RS485 Base
+  9600 baud 8N1  |  LED G27  |  RX G22  TX G19
+================================================
+[nvs] FG6485A addr=1  mode=0  temp=250  hum=500
+[nvs] S200    addr=44  mode=0  spd=5000  dir=180000
+[nvs] live    lat=52.370  lon=4.900
+[nvs] ntp     server=pool.ntp.org
+[fg6485a] handlers registered for addr 1
+[s200] handlers registered for addr 44
+[modbus] slave started  addr_a=1  addr_b=44
+```
+
+**Boot 2 — after writing `nvs_cfg_set_i16("fg_temp_manual", 333)` in `setup()`:**
+```
+[nvs] FG6485A addr=1  mode=0  temp=333  hum=500
+```
+FC03 response for FG6485A addr=1 reg=0x0001: `01 4D` = 333 ✓
+
+**Boot 3 — same firmware, reboot only (no write):**
+```
+[nvs] FG6485A addr=1  mode=0  temp=333  hum=500
+```
+Value persists across reboot. ✓
+
+**Boot 4 — firmware reflashed (NVS partition not erased by `pio run -t upload`):**
+```
+[nvs] FG6485A addr=1  mode=0  temp=333  hum=500
+```
+NVS survives firmware update. ✓  Modbus poll cycle still delivers correct frames:
+```
+[modbus] RX → 01 03 00 00 00 02 C4 0B
+[fg6485a] FC03 reg=0x0000 qty=2 → 01F4 014D
+[modbus] TX → 01 03 04 01 F4 01 4D 7B 98
+[modbus] RX → 2C 04 00 08 00 0C 77 B0
+[s200] FC04 reg=0x0008 qty=12 → 0002 BF20 0002 BF20 0002 BF20 0000 1388 0000 1388 0000 1388
+[modbus] TX → 2C 04 18 00 02 BF 20 00 02 BF 20 00 02 BF 20 00 00 13 88 00 00 13 88 00 00 13 88 16 04
+[modbus] RX → 2C 04 00 1C 00 02 B6 70
+[s200] FC04 reg=0x001C qty=2 → 0000 61A8
+[modbus] TX → 2C 04 04 00 00 61 A8 2E A8
+```
+
+### Findings
+
+#### NVS partition is separate from firmware flash
+`pio run -t upload` erases only the firmware partition (0x10000–0x5AFFF).
+The NVS partition lives at a different address and is preserved.
+To reset all settings to defaults: `pio run -t erase` (full flash erase).
+
+#### `nvs_flash_init()` idempotency guard
+The Arduino ESP32 framework (v2.0.9) does not call `nvs_flash_init()`
+internally before `setup()`.  On the first call from `nvs_cfg_init()` it
+returns `ESP_OK`.  The guard for `ESP_ERR_INVALID_STATE` is a defensive
+measure for future framework versions.
+
+#### Float stored as 4-byte blob
+ESP-IDF NVS has no native float type.  `nvs_cfg_get_float` / `nvs_cfg_set_float`
+use `nvs_get_blob` / `nvs_set_blob` with `size = sizeof(float)`.  This is
+endianness-safe (both read and write happen on the same ESP32).
+
+#### NVS handle kept open
+`nvs_open()` is called once in `nvs_cfg_init()` and the handle is kept open
+for the firmware lifetime.  This is the standard ESP-IDF pattern.
+
+### Files changed
+
+| File | Change |
+|------|--------|
+| `sensorEmulator/config/nvs_config.h` | New — typed get/set API, key constants, `nvs_cfg_load_all()` |
+| `sensorEmulator/config/nvs_config.cpp` | New — ESP-IDF NVS implementation |
+| `sensorEmulator/sensors/sensor_state.h` | Added `sensor_mode_t` enum; added `fg_mode` and `s200_mode` fields |
+| `sensorEmulator/sensors/sensor_state.cpp` | Init `fg_mode = SENSOR_MODE_MANUAL`, `s200_mode = SENSOR_MODE_MANUAL` |
+| `sensorEmulator/main.cpp` | Phase 5 banner; `nvs_cfg_init()` added; `nvs_cfg_load_all()` loads NVS into sensor_state; slave addresses passed from NVS to handler registration and `modbus_slave_set_addrs` |
+
+### Build metrics
+
+| Metric | Value |
+|--------|-------|
+| RAM used | 7.3 % (24 024 / 327 680 bytes) |
+| Flash used | 23.1 % (303 293 / 1 310 720 bytes) |
+
+### Verification results
+
+| Check | Result |
+|-------|--------|
+| Firmware builds without errors or warnings | ✅ Pass |
+| Boot banner shows "Phase 5 NVS Settings" | ✅ Pass |
+| `[nvs] namespace 'emulator' opened` printed on boot | ✅ Pass |
+| Fresh NVS → FG6485A defaults: addr=1 mode=0 temp=250 hum=500 | ✅ Pass |
+| Fresh NVS → S200 defaults: addr=44 mode=0 spd=5000 dir=180000 | ✅ Pass |
+| Fresh NVS → live lat=52.370 lon=4.900 (blob round-trip) | ✅ Pass |
+| Fresh NVS → ntp server=pool.ntp.org (string round-trip) | ✅ Pass |
+| `nvs_cfg_set_i16("fg_temp_manual", 333)` → temp=333 on next boot | ✅ Pass |
+| Reboot without write → temp=333 retained (NVS persistence) | ✅ Pass |
+| Firmware reflash → temp=333 retained (NVS partition preserved) | ✅ Pass |
+| FC03 response reg 0x0001 = 0x014D (333) matches NVS-loaded value | ✅ Pass |
+| All three Modbus frames answered correctly | ✅ Pass |
+| Master accepts all responses without retry | ✅ Pass |
+| No WDT crash, no panic, stable over multiple poll cycles | ✅ Pass |
+
+### Deviations from plan
+
+| Plan item | Deviation |
+|-----------|-----------|
+| `nvs_cfg_init()` called "before everything" | Called after `Serial.begin()`, `led_init()`, `rs485_init()` so NVS errors can be printed via Serial. Functionally identical. |
+| `s200_slave_addr` field in `sensor_state_t` | Not added. The S200 address is already mirrored in `s200_slave_addr_reg` (FC03-readable config register). FG6485A address is a local variable in `setup()`. Neither requires a new struct field for Phase 5. |

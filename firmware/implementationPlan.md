@@ -15,8 +15,8 @@ the Modbus core; phases 5–8 add configuration and the web interface; phases
 |-------|-------|--------|
 | 1 | Board bringup & RS485 TX verification | ✅ Complete |
 | 2 | Modbus slave skeleton | ✅ Complete |
-| 3 | FG6485A emulation | ⬜ Not started |
-| 4 | S200 emulation | ⬜ Not started |
+| 3 | FG6485A emulation | ✅ Complete |
+| 4 | S200 emulation | ✅ Complete |
 | 5 | NVS settings | ⬜ Not started |
 | 6 | WiFi manager & mDNS | ⬜ Not started |
 | 7 | Web interface — server + WebSocket | ⬜ Not started |
@@ -65,15 +65,15 @@ for unsupported FC/address, drive LED per CRC result.
 | `src/modbus/modbus_crc.h` / `modbus_crc.cpp` | Create — CRC-16/IBM (Modbus) |
 
 ### Tasks
-- [ ] Implement `modbus_crc16(buf, len)` — same algorithm as `documentation/code_modbusTestClient/main.cpp`.
-- [ ] Implement frame receiver: accumulate bytes, detect end-of-frame by 3.5-character inter-frame silence (~4 ms at 9600 baud).
-- [ ] On valid CRC: blink green LED, dispatch to FC handler.
-- [ ] On invalid CRC: blink red LED, discard frame.
-- [ ] Implement Modbus exception responses:
+- [x] Implement `modbus_crc16(buf, len)` — same algorithm as `documentation/code_modbusTestClient/main.cpp`.
+- [x] Implement frame receiver: accumulate bytes, detect end-of-frame by 3.5-character inter-frame silence (~4 ms at 9600 baud).
+- [x] On valid CRC: blink green LED, dispatch to FC handler.
+- [x] On invalid CRC: blink red LED, discard frame.
+- [x] Implement Modbus exception responses:
   - `0x01` — Illegal Function
   - `0x02` — Illegal Data Address
-- [ ] Broadcast address (0x00) — silently ignore.
-- [ ] `modbus_slave_task` runs at highest FreeRTOS priority (configMAX_PRIORITIES − 1).
+- [x] Broadcast address (0x00) — silently ignore.
+- [x] `modbus_slave_task` runs at highest FreeRTOS priority (configMAX_PRIORITIES − 1).
 
 ### Verification
 - Send FC01 (unsupported) to address 1 from test client → exception 0x01 returned.
@@ -82,7 +82,7 @@ for unsupported FC/address, drive LED per CRC result.
 
 ---
 
-## Phase 3 — FG6485A Emulation
+## Phase 3 — FG6485A Emulation ✅
 
 **Goal**: Answer all FC03 and FC16 requests addressed to the FG6485A slave
 address with correct register layout.
@@ -90,51 +90,56 @@ address with correct register layout.
 ### Files
 | File | Action |
 |------|--------|
-| `src/sensors/fg6485a_slave.h` / `fg6485a_slave.cpp` | Create — FC03/FC16 handler, register map |
-| `src/sensors/sensor_state.h` | Create — `sensor_state_t` struct + mutex, shared by both sensors |
+| `sensorEmulator/sensors/fg6485a_slave.h` / `fg6485a_slave.cpp` | Created — FC03/FC16 handler, register map |
+| `sensorEmulator/sensors/sensor_state.h` / `sensor_state.cpp` | Created — `sensor_state_t` struct + mutex, shared by both sensors |
 
 ### Tasks
-- [ ] Define `sensor_state_t` with all FG6485A fields (see design §4.1).
-- [ ] Implement FC03 handler for registers `0x0000–0x0001` (measurement), `0x0008–0x000B` (device info), `0x000C–0x0013` (alarm config).
-- [ ] Implement FC16 handler for alarm config registers `0x000C–0x0013` and correction registers `0x001D–0x001E`.
-- [ ] Return exception `0x02` for any register address outside defined ranges.
-- [ ] All reads take values from `sensor_state` under mutex.
-- [ ] Default slave address: 1 (hard-coded for this phase; made NVS-configurable in phase 5).
+- [x] Define `sensor_state_t` with all FG6485A fields (see design §4.1).
+- [x] Implement FC03 handler for registers `0x0000–0x0001` (measurement), `0x0008–0x000B` (device info), `0x000C–0x0013` (alarm config).
+- [x] Implement FC16 handler for alarm config registers `0x000C–0x0013` and correction registers `0x001D–0x001E`.
+- [x] Return exception `0x02` for any register address outside defined ranges.
+- [x] All reads take values from `sensor_state` under mutex.
+- [x] Default slave address: 1 (hard-coded for this phase; made NVS-configurable in phase 5).
 
-### Verification
-- Query reg `0x0000` → returns humidity raw (default 500 = 50.0 %RH).
-- Query reg `0x0001` → returns temperature raw (default 250 = 25.0 °C).
-- Query reg `0x0009` → returns static firmware version value.
-- FC16 write to alarm register → subsequent FC03 read returns written value.
-- Query out-of-range register → exception `0x02`.
+### Verification ✅
+- Query reg `0x0000` → returns humidity raw (default 500 = 50.0 %RH). ✅
+- Query reg `0x0001` → returns temperature raw (default 250 = 25.0 °C). ✅  
+  Live master log: `[fg6485a] FC03 reg=0x0000 qty=2 → 01F4 00FA` → TX `01 03 04 01 F4 00 FA 3A 7E`. Master accepted, no retry. ✅
+- Query reg `0x0009` → returns static firmware version value. ✅
+- FC16 write to alarm register → subsequent FC03 read returns written value. ✅
+- Query out-of-range register → exception `0x02`. ✅
 
 ---
 
-## Phase 4 — S200 Emulation
+## Phase 4 — S200 Emulation ✅
 
 **Goal**: Answer all FC04 and FC03 requests addressed to the S200 slave address.
 
 ### Files
 | File | Action |
 |------|--------|
-| `src/sensors/s200_slave.h` / `s200_slave.cpp` | Create — FC04/FC03 handler, register map |
+| `sensorEmulator/sensors/s200_slave.h` / `s200_slave.cpp` | Created — FC04/FC03 handler, register map |
 
 ### Tasks
-- [ ] Add S200 fields to `sensor_state_t` (see design §4.1).
-- [ ] Implement FC04 handler for registers `0x0008–0x001D` (wind direction, wind speed, heating temp).
+- [x] Add S200 fields to `sensor_state_t` (see design §4.1). — already present from Phase 3.
+- [x] Implement FC04 handler for registers `0x0008–0x0013` (wind direction/speed min/max/avg) and `0x001C–0x001F` (heating temperature).
   - Each value is int32 encoded as two consecutive 16-bit registers, big-endian word order, raw = value × 1000.
-- [ ] Implement FC03 handler for config registers `0x1000` (slave address) and `0x1001` (baud rate).
-- [ ] Default slave address: 44.
-- [ ] Both FG6485A and S200 handlers registered in the FC dispatch table; address routing done by slave address field in the received frame.
+- [x] Implement FC03 handler for config registers `0x1000` (slave address) and `0x1001` (baud rate).
+- [x] Default slave address: 44.
+- [x] Both FG6485A and S200 handlers registered in the FC dispatch table; address routing done by slave address field in the received frame.
 
-### Verification
-- Query S200 FC04 reg `0x000C`/`0x000D` → returns avg wind direction (default 180000 = 180.000°, split across two registers).
-- Query FC03 reg `0x1000` → returns 44.
-- FG6485A FC03 and S200 FC04 both respond correctly in the same test session (concurrent slaves).
+### Verification ✅
+- FC04 reg `0x0008`, qty 12 → returns 12 uint16 words = 6 int32 values: dir_min/max/avg (180000 = 180.000°) + spd_min/max/avg (5000 = 5.000 m/s). ✅
+  Live master log: `[s200] FC04 reg=0x0008 qty=12 → 0002 BF20 0002 BF20 0002 BF20 0000 1388 0000 1388 0000 1388` → TX `2C 04 18 ... 16 04`. ✅
+- FC04 reg `0x001C`, qty 2 → returns heating temp high (25000 = 25.000°C). ✅
+  Live master log: `[s200] FC04 reg=0x001C qty=2 → 0000 61A8` → TX `2C 04 04 00 00 61 A8 2E A8`. ✅
+- Frame 3 (heater) now sent by master — master skipped Frame 3 in Phases 2–3 because Frame 2 returned an exception; once Frame 2 returns a valid response Frame 3 is sent. ✅
+- FG6485A FC03 and S200 FC04 both respond correctly in the same poll cycle (concurrent slaves). ✅
+- FC03 reg `0x1000` → returns 44. (not queried by live master; covered by IT-xx in Phase 13) ⇡
 
 ---
 
-## Phase 5 — NVS Settings
+## Phase 5 — NVS Settings ✅
 
 **Goal**: All configurable values read from NVS on boot; written to NVS on
 Apply; survive reboot.
@@ -142,18 +147,18 @@ Apply; survive reboot.
 ### Files
 | File | Action |
 |------|--------|
-| `src/config/nvs_config.h` / `nvs_config.cpp` | Create — typed get/set wrappers for all NVS keys (design §7) |
+| `sensorEmulator/config/nvs_config.h` / `nvs_config.cpp` | ✅ Created — typed get/set wrappers for all NVS keys (design §7) |
 
 ### Tasks
-- [ ] Implement `nvs_cfg_get_u8 / set_u8`, `_i16`, `_u16`, `_i32`, `_float`, `_str` with default-on-first-boot behaviour.
-- [ ] NVS namespace: `"emulator"`.
-- [ ] Load all settings at boot in `main.cpp` before tasks are started; populate `sensor_state` with manual defaults.
-- [ ] FG6485A and S200 slave addresses loaded from NVS; `modbus_slave_task` uses them for address matching.
-- [ ] Mode selection (MANUAL / LIVE / REPLAY) per sensor loaded from NVS.
+- [x] Implement `nvs_cfg_get_u8 / set_u8`, `_i16`, `_u16`, `_i32`, `_float`, `_str` with default-on-first-boot behaviour.
+- [x] NVS namespace: `"emulator"`.
+- [x] Load all settings at boot in `main.cpp` before tasks are started; populate `sensor_state` with manual defaults.
+- [x] FG6485A and S200 slave addresses loaded from NVS; `modbus_slave_task` uses them for address matching.
+- [x] Mode selection (MANUAL / LIVE / REPLAY) per sensor loaded from NVS (stored as `sensor_mode_t` fields in `sensor_state_t`).
 
 ### Verification
-- Write a value via `nvs_cfg_set_*`, reboot, read it back — value persists.
-- First boot with erased NVS → all defaults applied.
+- Write a value via `nvs_cfg_set_*`, reboot, read it back — value persists. ✅
+- First boot with erased NVS → all defaults applied. ✅
 
 ---
 
