@@ -539,3 +539,63 @@ for the firmware lifetime.  This is the standard ESP-IDF pattern.
 |-----------|-----------|
 | `nvs_cfg_init()` called "before everything" | Called after `Serial.begin()`, `led_init()`, `rs485_init()` so NVS errors can be printed via Serial. Functionally identical. |
 | `s200_slave_addr` field in `sensor_state_t` | Not added. The S200 address is already mirrored in `s200_slave_addr_reg` (FC03-readable config register). FG6485A address is a local variable in `setup()`. Neither requires a new struct field for Phase 5. |
+
+---
+
+## Phase 6 — WiFi Manager & mDNS ✅
+
+### Build
+
+| Metric | Value |
+|--------|-------|
+| RAM | 14.1% (46 300 / 327 680 bytes) |
+| Flash | 59.9% (785 101 / 1 310 720 bytes) |
+| Auto-discovered libs | FastLED 3.10.3, ESPmDNS 2.0.0, WiFi 2.0.0, SPI 2.0.0 |
+
+### Serial log — AP-only boot (no NVS credentials)
+
+```
+[wifi] manager initialised
+[wifi] AP started  SSID="SensorEmulator-B78D"  IP=192.168.4.1
+[wifi] no STA credentials in NVS — AP-only mode
+```
+
+### Serial log — STA connect + mDNS boot
+
+```
+[wifi] manager initialised
+[wifi] AP started  SSID="SensorEmulator-B78D"  IP=192.168.4.1
+[wifi] STA connecting to "casaminerva_nomap" (NVS)...
+[wifi] STA connected  IP=192.168.20.226
+[wifi] AP disabled
+[wifi] mDNS started  http://emulator.local
+```
+
+### Files created / modified
+
+| File | Change |
+|------|--------|
+| `sensorEmulator/wifi/wifi_manager.h` | Created — AP/STA FSM declarations, EventGroup bits, public API |
+| `sensorEmulator/wifi/wifi_manager.cpp` | Created — `wifi_manager_task` (priority 2, stack 8192): AP start, STA connect from NVS, mDNS on GOT_IP, AP restart on disconnect, auto-retry |
+| `sensorEmulator/main.cpp` | Phase 6 banner; `#include "wifi/wifi_manager.h"`; `wifi_manager_init()` called after `xTaskCreate(modbus_slave_task, ...)` |
+
+### Verification
+
+| Check | Result |
+|-------|--------|
+| Boot banner shows "Phase 6 WiFi & mDNS" | ✅ Pass |
+| AP starts: `SensorEmulator-B78D  IP=192.168.4.1` | ✅ Pass |
+| With no NVS credentials: AP-only mode message | ✅ Pass |
+| With NVS credentials: STA connects `IP=192.168.20.226` | ✅ Pass |
+| AP disabled after STA connect | ✅ Pass |
+| mDNS `http://emulator.local` registered | ✅ Pass |
+| All three Modbus frames answered correctly alongside WiFi | ✅ Pass |
+| No WDT crash, no panic | ✅ Pass |
+
+### Deviations from plan
+
+| Plan item | Deviation |
+|-----------|-----------|
+| `esp_wifi_set_mode(WIFI_MODE_STA)` on STA connect | Used `WiFi.softAPdisconnect(true)` (Arduino API) — equivalent outcome, avoids mixing ESP-IDF and Arduino WiFi API layers. |
+| Single GOT_IP event assumed | ESP-IDF fires `STA_GOT_IP` twice when mode transitions occur. Fixed with `s_state != WIFI_STATE_STA` guard so only the first event triggers the AP-disable + mDNS sequence. |
+

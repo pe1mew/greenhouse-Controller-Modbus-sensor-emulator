@@ -6,6 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ---
 
+## [0.6.0] — 2026-05-06  Phase 6: WiFi Manager & mDNS
+
+### Added
+- `firmware/sensorEmulator/wifi/wifi_manager.h` / `wifi_manager.cpp` — WiFi AP/STA FSM:
+  - On boot: open AP `SensorEmulator-XXYY` (last 2 MAC bytes, IP `192.168.4.1`).
+  - If NVS contains `wifi_ssid` / `wifi_pass`: attempts STA connect concurrently.
+  - On `STA_GOT_IP`: disables AP, starts mDNS hostname `emulator` (`http://emulator.local`), sets `WIFI_EVT_STA_CONNECTED` EventGroup bit.
+  - On `STA_DISCONNECTED`: stops mDNS, restarts AP, auto-retries stored credentials.
+  - `wifi_manager_connect(ssid, pass)` — queued connect request for web interface (Phase 7).
+  - `wifi_manager_get_event_group()`, `wifi_manager_get_state()`, `wifi_manager_get_sta_ip()`, `wifi_manager_get_ap_ssid()` — accessors for other tasks.
+- All WiFi/mDNS calls confined to `wifi_manager_task` (priority 2, stack 8 KiB); event callback only posts FreeRTOS task-notification bits.
+- Duplicate `STA_GOT_IP` guard (`s_state != WIFI_STATE_STA`) prevents ASSOC_LEAVE disconnect loop caused by ESP-IDF firing the event twice during mode transitions.
+
+### Changed
+- `firmware/sensorEmulator/main.cpp` — Phase 6 banner; `wifi_manager_init()` called after Modbus slave task starts.
+
+---
+
 ## [Unreleased]
 
 ### Added

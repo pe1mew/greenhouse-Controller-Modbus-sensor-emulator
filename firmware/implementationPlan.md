@@ -173,22 +173,24 @@ Apply; survive reboot.
 | `src/wifi/wifi_manager.h` / `wifi_manager.cpp` | Create — AP/STA FSM, event handlers |
 
 ### Tasks
-- [ ] On boot, start AP:
+- [x] On boot, start AP:
   - Read last 2 bytes of `WIFI_IF_AP` MAC.
   - SSID = `SensorEmulator-XXYY` (uppercase hex).
   - Open (no password), IP `192.168.4.1`.
-- [ ] If NVS contains SSID + password, attempt STA connect concurrently.
-- [ ] On STA connect event:
-  - Stop AP (`esp_wifi_set_mode(WIFI_MODE_STA)`).
+- [x] If NVS contains SSID + password, attempt STA connect concurrently.
+- [x] On STA connect event:
+  - Stop AP (`WiFi.softAPdisconnect(true)`).
   - Initialise mDNS, set hostname `emulator`, service type `_http._tcp` port 80.
-- [ ] On STA disconnect: restart AP, re-expose config page.
-- [ ] Expose `wifi_manager_connect(ssid, pass)` for web interface POST handler.
-- [ ] Event bits in a FreeRTOS EventGroup: `WIFI_STA_CONNECTED`, `WIFI_STA_DISCONNECTED` — used by NTP task and live-fetch task.
+- [x] On STA disconnect: restart AP, re-expose config page.
+- [x] Expose `wifi_manager_connect(ssid, pass)` for web interface POST handler.
+- [x] Event bits in a FreeRTOS EventGroup: `WIFI_STA_CONNECTED`, `WIFI_STA_DISCONNECTED` — used by NTP task and live-fetch task.
 
 ### Verification
-- Power on with no NVS credentials → SSID `SensorEmulator-XXYY` visible in scan.
-- Connect phone to AP → `192.168.4.1` responds (HTTP 200, even if page is empty).
-- Configure STA credentials via serial console helper → device connects, AP disappears, `emulator.local` responds.
+- [x] Power on with no NVS credentials → SSID `SensorEmulator-B78D` visible.
+- [x] AP `192.168.4.1` starts immediately on boot.
+- [x] NVS credentials stored → STA connects (`192.168.20.226`), AP disappears, `emulator.local` registered.
+- [x] `WIFI_EVT_STA_CONNECTED` EventGroup bit set after connect.
+- [x] Duplicate GOT_IP guard prevents ASSOC_LEAVE disconnect loop.
 
 ---
 

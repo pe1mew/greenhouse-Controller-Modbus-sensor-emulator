@@ -1,17 +1,18 @@
 /**
  * @file main.cpp
- * @brief Modbus Sensor Emulator — Phase 5: NVS Settings.
+ * @brief Modbus Sensor Emulator — Phase 6: WiFi Manager & mDNS.
  *
- * All configurable values (slave addresses, manual register values, sensor
- * modes) are now persisted in NVS under the "emulator" namespace and loaded
- * at boot.  Modbus behaviour is identical to Phase 4 when NVS is fresh
- * (first-boot defaults match the Phase 4 hardcoded values).
+ * Adds concurrent WiFi management alongside the Modbus slave.  The WiFi
+ * manager starts an open AP ("SensorEmulator-XXYY") on every boot and
+ * attempts STA connection when NVS credentials are present.  On STA connect
+ * mDNS registers the device as "emulator.local".
  *
  * Boot sequence:
  *   1. nvs_cfg_init()          — open "emulator" NVS namespace
  *   2. sensor_state_init()     — set hardcoded defaults + create mutex
  *   3. nvs_cfg_load_all()      — overwrite defaults with NVS-stored values
- *   4. Register handlers and start Modbus slave task
+ *   4. Register Modbus handlers; start modbus_slave_task
+ *   5. wifi_manager_init()     — start AP + STA FSM task
  *
  * FG6485A (slave addr from NVS, default 1):
  *   FC03 0x0000–0x0001  → humidity + temperature (×10 encoding)
@@ -47,6 +48,7 @@
 #include "sensors/fg6485a_slave.h"
 #include "sensors/s200_slave.h"
 #include "config/nvs_config.h"
+#include "wifi/wifi_manager.h"
 
 // ---------------------------------------------------------------------------
 // Arduino entry points
@@ -65,7 +67,7 @@ void setup()
 
     Serial.println();
     Serial.println("================================================");
-    Serial.println("  Modbus Sensor Emulator — Phase 5 NVS Settings");
+    Serial.println("  Modbus Sensor Emulator — Phase 6 WiFi & mDNS");
     Serial.println("  M5Stack Atom Lite + Atomic RS485 Base");
     Serial.println("  9600 baud 8N1  |  LED G27  |  RX G22  TX G19");
     Serial.println("================================================");
@@ -88,6 +90,9 @@ void setup()
     // Start Modbus slave at highest FreeRTOS priority.
     xTaskCreate(modbus_slave_task, "modbus_slave", 4096, nullptr,
                 configMAX_PRIORITIES - 1, nullptr);
+
+    // Start WiFi manager (AP + STA FSM + mDNS).
+    wifi_manager_init();
 }
 
 void loop()
