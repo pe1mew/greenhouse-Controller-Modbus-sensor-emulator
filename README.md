@@ -13,7 +13,7 @@ This project was developed to aid with the development of a [Greenhouse Controll
   - **Replay** — timestamped `.csv` file replayed at wall-clock speed
 - Location auto-detected from public IP (priority 1) or set manually in the web interface (priority 2)
 - WiFi: automatic AP/STA switching; AP SSID `SensorEmulator-AABB` (open, no password)
-- mDNS: reachable as `http://emulator.local` when connected to a WiFi network
+- mDNS: reachable as `http://sensor-emulator.local` when connected to a WiFi network
 - NTP time synchronisation (configurable server); manual time fallback
 - Live-updating web interface (HTTP + WebSocket), available in both AP and STA mode
 - Modbus activity log streamed live to the web interface

@@ -130,10 +130,15 @@ void modbus_log_post(log_dir_t dir, const uint8_t *frame, uint8_t len)
     // Format timestamp now, in the caller's context (high-prio slave task).
     // This keeps the push task's stack free of large intermediate buffers.
     time_t now = time(nullptr);
-    if (now > 1577836800LL) {   // > 2020-01-01 — clock is set
+    if (now > 1577836800LL) {   // > 2020-01-01 — NTP-synced wall clock
         struct tm ti;
         localtime_r(&now, &ti);
         strftime(entry.ts, sizeof(entry.ts), "%Y-%m-%d %H:%M:%S", &ti);
+    } else {
+        // Clock not yet set — fall back to device uptime in +HH:MM:SS format.
+        uint32_t up_s = (uint32_t)(millis() / 1000UL);
+        snprintf(entry.ts, sizeof(entry.ts), "+%02u:%02u:%02u",
+                 up_s / 3600u, (up_s % 3600u) / 60u, up_s % 60u);
     }
 
     // Direction string.

@@ -1,5 +1,5 @@
 """
-server.py — Web Mock for the Modbus Sensor Emulator (Phase 12)
+server.py — Web Mock for the Modbus Sensor Emulator (Phase 13)
 
 Emulates the HTTP + WebSocket interface of firmware/sensorEmulator/web/web_server.cpp
 on a desktop PC. Serves firmware/data/ assets directly and simulates all endpoints
@@ -14,8 +14,8 @@ Endpoints:
     POST /config/tz          — POSIX TZ string (e.g. "CET-1CEST,M3.5.0,M10.5.0/3")
     POST /config/ntp         — NTP server; simulates 2 s sync
     POST /config/location    — lat/lon for Live-mode weather fetch
-    POST /replay/upload      — CSV body; stores in memory
-    POST /replay/control     — {"action":"start"|"stop"}
+    POST /replay/upload      — CSV body; parsed and cached in memory
+    POST /replay/control     — {"action":"start"|"stop"|"pause"|"play"|"next"|"prev"}
     POST /log/clear          — broadcasts {"type":"log_clear"} WS message
 
 Usage:
@@ -95,9 +95,11 @@ _state = {
     'live_fetch_age': 0,
     'live_fetch_ok':  True,
     # Replay
-    'replay_state':  'idle',   # idle | running | done | error
-    'replay_row':    0,
-    'replay_csv':    None,     # raw CSV bytes stored in memory
+    'replay_state':    'idle',   # idle | running | paused | done | error
+    'replay_row':      -1,
+    'replay_row_count': 0,
+    'replay_elapsed_s': 0,
+    'replay_csv':      None,     # raw CSV bytes stored in memory
 }
 _state_lock = threading.Lock()
 
@@ -108,6 +110,57 @@ _state_lock = threading.Lock()
 _ws_clients: set = set()
 _ws_lock = threading.Lock()
 
+_replay_rows: list = []   # parsed rows: list of {ts_s, fg_temp, fg_hum, ...}
+_prev_row_idx: int = -1   # used to detect row changes for window events
+
+
+def _parse_csv(data_bytes: bytes) -> list:
+    """Parse CSV bytes into a list of row dicts with ts_s and optional sensor fields."""
+    rows = []
+    header = None
+    for raw_line in data_bytes.decode('utf-8', errors='replace').splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith('#'):
+            continue
+        parts = [p.strip() for p in line.split(',')]
+        if header is None:
+            header = parts
+            continue
+        row: dict = {}
+        for i, col in enumerate(header):
+            val = parts[i] if i < len(parts) else ''
+            if col == 'timestamp' and val:
+                try:
+                    h, m, s = val.split(':')
+                    row['ts_s'] = int(h) * 3600 + int(m) * 60 + int(s)
+                except Exception:
+                    pass
+            elif col in ('fg_temp', 'fg_hum', 's200_spd', 's200_dir', 's200_heat') and val:
+                try:
+                    row[col] = float(val)
+                except Exception:
+                    pass
+        if 'ts_s' in row:
+            rows.append(row)
+    return rows
+
+
+def _build_window_entry(rows: list, idx: int):
+    """Return a window entry dict, or None if out of range."""
+    if idx < 0 or idx >= len(rows):
+        return None
+    r = rows[idx]
+    ts_s = r.get('ts_s', 0)
+    h, m, s = ts_s // 3600, (ts_s % 3600) // 60, ts_s % 60
+    return {
+        'row':       idx,
+        'ts':        f'{h:02d}:{m:02d}:{s:02d}',
+        'fg_temp':   r.get('fg_temp',   None),
+        'fg_hum':    r.get('fg_hum',    None),
+        's200_spd':  r.get('s200_spd',  None),
+        's200_dir':  r.get('s200_dir',  None),
+        's200_heat': r.get('s200_heat', None),
+    }
 # Sequence counter for fake log entries.
 _log_tick = 0
 # Alternating fake frames to make the log more varied.
@@ -177,18 +230,55 @@ def build_status_json() -> str:
         'live_fetch_age': s['live_fetch_age'],
         'live_fetch_ok':  s['live_fetch_ok'],
         'replay': {
-            'state': s['replay_state'],
-            'row':   s['replay_row'],
+            'state':     s['replay_state'],
+            'row':       s['replay_row'],
+            'row_count': s['replay_row_count'],
+            'elapsed_s': s['replay_elapsed_s'],
         },
     })
 
 
 def _push_thread() -> None:
-    """Background thread: 1 Hz status push + synthetic Modbus log entries."""
-    global _log_tick
+    """Background thread: 1 Hz status push + replay timer + fake log entries."""
+    global _log_tick, _replay_rows, _prev_row_idx
     while True:
         time.sleep(1)
+
+        # Advance replay timer and inject rows.
+        window_changed = False
+        with _state_lock:
+            if _state['replay_state'] == 'running' and _replay_rows:
+                _state['replay_elapsed_s'] += 1
+                elapsed = _state['replay_elapsed_s']
+                cur = _state['replay_row']
+                # Advance to the last row whose ts_s <= elapsed_s.
+                while (cur + 1 < len(_replay_rows) and
+                       _replay_rows[cur + 1]['ts_s'] <= elapsed):
+                    cur += 1
+                if cur != _state['replay_row']:
+                    _state['replay_row'] = cur
+                    window_changed = True
+                # Transition to DONE when all rows have been reached.
+                if cur >= len(_replay_rows) - 1 and elapsed >= _replay_rows[-1]['ts_s']:
+                    _state['replay_state'] = 'done'
+
         ws_broadcast(build_status_json())
+
+        # Push replay_window event if current row changed.
+        if window_changed:
+            with _state_lock:
+                rows = list(_replay_rows)
+                idx  = _state['replay_row']
+            prev_e = _build_window_entry(rows, idx - 1)
+            curr_e = _build_window_entry(rows, idx)
+            next_e = _build_window_entry(rows, idx + 1)
+            ws_broadcast(json.dumps({
+                'type': 'replay_window',
+                'prev': prev_e,
+                'curr': curr_e,
+                'next': next_e,
+            }))
+
         # Push a fake log entry every 5 ticks.
         if _log_tick % 5 == 0:
             frame_hex, direction, summary = _FAKE_FRAMES[(_log_tick // 5) % len(_FAKE_FRAMES)]
@@ -406,28 +496,71 @@ def config_ntp():
 
 @app.route('/replay/upload', methods=['POST'])
 def replay_upload():
+    global _replay_rows
     data = request.get_data()
     if not data:
         return jsonify({'error': 'Empty body'}), 400
+    parsed = _parse_csv(data)
     with _state_lock:
-        _state['replay_csv']   = data
-        _state['replay_state'] = 'idle'
-        _state['replay_row']   = 0
+        _state['replay_csv']       = data
+        _state['replay_state']     = 'idle'
+        _state['replay_row']       = -1
+        _state['replay_row_count'] = len(parsed)
+        _state['replay_elapsed_s'] = 0
+    _replay_rows = parsed
     return jsonify({'ok': True, 'size': len(data)})
 
 
 @app.route('/replay/control', methods=['POST'])
 def replay_control():
+    global _replay_rows
     body   = request.get_json(silent=True) or {}
     action = body.get('action', '')
     with _state_lock:
-        if action == 'start' and _state['replay_csv']:
-            _state['replay_state'] = 'running'
-            _state['replay_row']   = 0
-        elif action == 'stop':
-            _state['replay_state'] = 'idle'
         state = _state['replay_state']
-    return jsonify({'ok': True, 'state': state})
+        rows  = _state['replay_row_count']
+
+        if action == 'start' and _state['replay_csv']:
+            _state['replay_state']     = 'running'
+            _state['replay_row']       = -1
+            _state['replay_elapsed_s'] = 0
+        elif action == 'stop':
+            _state['replay_state']     = 'idle'
+            _state['replay_row']       = -1
+            _state['replay_elapsed_s'] = 0
+        elif action == 'pause' and _state['replay_state'] == 'running':
+            _state['replay_state'] = 'paused'
+        elif action == 'play' and _state['replay_state'] == 'paused':
+            _state['replay_state'] = 'running'
+        elif action == 'next' and _state['replay_state'] == 'paused':
+            nxt = _state['replay_row'] + 1
+            if nxt < _state['replay_row_count']:
+                _state['replay_row']       = nxt
+                _state['replay_elapsed_s'] = _replay_rows[nxt]['ts_s'] if nxt < len(_replay_rows) else 0
+        elif action == 'prev' and _state['replay_state'] == 'paused':
+            prv = _state['replay_row'] - 1
+            if prv >= 0:
+                _state['replay_row']       = prv
+                _state['replay_elapsed_s'] = _replay_rows[prv]['ts_s'] if prv < len(_replay_rows) else 0
+
+        state     = _state['replay_state']
+        cur_row   = _state['replay_row']
+        elapsed_s = _state['replay_elapsed_s']
+
+    # Push window event for nav actions.
+    if action in ('next', 'prev', 'start') and state in ('running', 'paused'):
+        rows_snap = list(_replay_rows)
+        prev_e = _build_window_entry(rows_snap, cur_row - 1)
+        curr_e = _build_window_entry(rows_snap, cur_row)
+        next_e = _build_window_entry(rows_snap, cur_row + 1)
+        ws_broadcast(json.dumps({
+            'type': 'replay_window',
+            'prev': prev_e,
+            'curr': curr_e,
+            'next': next_e,
+        }))
+
+    return jsonify({'ok': True, 'state': state, 'row': cur_row, 'elapsed_s': elapsed_s})
 
 
 # ---------------------------------------------------------------------------

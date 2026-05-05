@@ -22,9 +22,10 @@ function wsConnect() {
   ws.onmessage = function (evt) {
     try {
       const msg = JSON.parse(evt.data);
-      if      (msg.type === 'status')    handleStatus(msg);
-      else if (msg.type === 'log')       appendLog(msg);
-      else if (msg.type === 'log_clear') clearLogTable();
+      if      (msg.type === 'status')         handleStatus(msg);
+      else if (msg.type === 'log')            appendLog(msg);
+      else if (msg.type === 'log_clear')      clearLogTable();
+      else if (msg.type === 'replay_window')  handleReplayWindow(msg);
     } catch (_) {}
   };
 }
@@ -139,15 +140,7 @@ function handleStatus(s) {
 
   // Replay status.
   if (s.replay) {
-    const stEl = document.getElementById('replay-status');
-    if (stEl) {
-      const stateMap = { idle: 'Idle', running: 'Running', done: 'Done (EOF)', error: 'Error' };
-      let txt = 'Replay: ' + (stateMap[s.replay.state] || s.replay.state);
-      if (s.replay.state === 'running' && s.replay.row >= 0) {
-        txt += '  —  row ' + s.replay.row;
-      }
-      stEl.textContent = txt;
-    }
+    handleReplayStatus(s.replay);
   }
 
   // On first message: sync all editable controls to the device's current state.
@@ -339,7 +332,87 @@ function postLocation() {
   });
 }
 
-// ── Replay ───────────────────────────────────────────────────────────────
+// ── Replay transport ─────────────────────────────────────────────────────
+let _replayState = 'idle';
+
+function fmtElapsed(sec) {
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = sec % 60;
+  return String(h).padStart(2,'0') + ':' + String(m).padStart(2,'0') + ':' + String(s).padStart(2,'0');
+}
+
+function handleReplayStatus(r) {
+  _replayState = r.state || 'idle';
+  const stateMap = { idle: 'Idle', running: 'Running', paused: 'Paused',
+                     done: 'Done (EOF)', error: 'Error' };
+  const stEl = document.getElementById('replay-status');
+  if (stEl) {
+    let txt = 'Replay: ' + (stateMap[_replayState] || _replayState);
+    if (r.row_count > 0 && r.row >= 0) txt += '  \u2014  row ' + r.row + ' / ' + r.row_count;
+    stEl.textContent = txt;
+  }
+  const elEl = document.getElementById('replay-elapsed');
+  if (elEl) {
+    elEl.textContent = (_replayState !== 'idle') ? 'Elapsed: ' + fmtElapsed(r.elapsed_s || 0) : '';
+  }
+  const win = document.getElementById('replay-window');
+  if (win) win.style.display = (_replayState !== 'idle') ? 'block' : 'none';
+
+  const btnStart = document.getElementById('btn-replay-start');
+  const btnPrev  = document.getElementById('btn-replay-prev');
+  const btnPause = document.getElementById('btn-replay-pause');
+  const btnNext  = document.getElementById('btn-replay-next');
+  const btnStop  = document.getElementById('btn-replay-stop');
+  const running  = (_replayState === 'running');
+  const paused   = (_replayState === 'paused');
+  const canStart = (_replayState === 'idle' || _replayState === 'done' || _replayState === 'error');
+  if (btnStart) btnStart.disabled = !canStart;
+  if (btnStop)  btnStop.disabled  = !(_replayState !== 'idle');
+  if (btnPause) {
+    btnPause.disabled  = !(running || paused);
+    btnPause.innerHTML = paused ? '&#9654; Play' : '&#9646;&#9646; Pause';
+  }
+  const atFirst = ((r.row || 0) <= 0);
+  const atLast  = (r.row_count > 0 && (r.row || 0) >= r.row_count - 1);
+  if (btnPrev) btnPrev.disabled = !(paused && !atFirst);
+  if (btnNext) btnNext.disabled = !(paused && !atLast);
+}
+
+function replayCmd(action) {
+  fetch('/replay/control', {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body:    JSON.stringify({ action }),
+  }).then(r => r.ok ? r.json() : null).then(r => {
+    if (r) handleReplayStatus(r);
+  }).catch(() => {});
+}
+
+function replayTogglePause() {
+  replayCmd(_replayState === 'paused' ? 'play' : 'pause');
+}
+
+function handleReplayWindow(msg) {
+  function fmtVal(v) { return (v === null || v === undefined) ? '\u2014' : v.toFixed(1); }
+  function fillRow(trId, entry, marker) {
+    const tr = document.getElementById(trId);
+    if (!tr) return;
+    if (!entry) { tr.innerHTML = '<td colspan="7">\u2014</td>'; return; }
+    tr.innerHTML =
+      '<td>' + (entry.ts || '\u2014') + '</td>' +
+      '<td>' + (marker ? '&#9658;' : '') + '</td>' +
+      '<td>' + fmtVal(entry.fg_temp)   + '</td>' +
+      '<td>' + fmtVal(entry.fg_hum)    + '</td>' +
+      '<td>' + fmtVal(entry.s200_spd)  + '</td>' +
+      '<td>' + fmtVal(entry.s200_dir)  + '</td>' +
+      '<td>' + fmtVal(entry.s200_heat) + '</td>';
+  }
+  fillRow('replay-win-prev', msg.prev, false);
+  fillRow('replay-win-curr', msg.curr, true);
+  fillRow('replay-win-next', msg.next, false);
+}
+
 function uploadReplayFile() {
   const input    = document.getElementById('replay-file');
   const statusEl = document.getElementById('replay-upload-status');
@@ -348,7 +421,7 @@ function uploadReplayFile() {
     return;
   }
   const file = input.files[0];
-  if (statusEl) statusEl.textContent = 'Uploading…';
+  if (statusEl) statusEl.textContent = 'Uploading\u2026';
   fetch('/replay/upload', {
     method:  'POST',
     headers: { 'Content-Type': 'text/csv' },
@@ -359,14 +432,6 @@ function uploadReplayFile() {
         r ? ('Uploaded ' + r.size + ' bytes.') : 'Upload failed.';
     })
     .catch(() => { if (statusEl) statusEl.textContent = 'Upload error.'; });
-}
-
-function startReplay() {
-  post('/replay/control', { action: 'start' });
-}
-
-function stopReplay() {
-  post('/replay/control', { action: 'stop' });
 }
 
 // ── Modbus log ───────────────────────────────────────────────────────────

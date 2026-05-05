@@ -90,7 +90,7 @@ void setup()
 
     Serial.println();
     Serial.println("================================================");
-    Serial.println("  Modbus Sensor Emulator — Phase 12 Modbus Log");
+    Serial.println("  Modbus Sensor Emulator \u2014 Phase 13 Replay Redesign");
     Serial.println("  M5Stack Atom Lite + Atomic RS485 Base");
     Serial.println("  9600 baud 8N1  |  LED G27  |  RX G22  TX G19");
     Serial.println("================================================");

@@ -6,6 +6,196 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ---
 
+## [0.9.0-beta] — 2026-05-05  First public beta release
+
+First public beta of the Greenhouse Controller Modbus Sensor Emulator.
+All core emulation, web interface, and replay features are complete and
+running stable on hardware (M5Stack Atom Lite, ESP32-PICO-D4).
+
+### Feature summary
+
+| Area | Status |
+|------|---------|
+| FG6485A Modbus RTU emulation (FC03, T/RH) | ✅ |
+| SenseCAP S200 Modbus RTU emulation (FC04, wind speed/dir/heat) | ✅ |
+| Manual mode — web sliders, NVS persistence | ✅ |
+| Live mode — Open-Meteo weather API | ✅ |
+| Replay mode — relative-time CSV playback, full transport controls | ✅ |
+| Replay event window (prev/curr/next row, WebSocket push) | ✅ |
+| WiFi AP/STA auto-switch, mDNS `sensor-emulator.local` | ✅ |
+| NTP time sync + manual time fallback | ✅ |
+| Modbus activity log (live WebSocket stream, resizable columns) | ✅ |
+| Per-sensor Modbus slave address (NVS) | ✅ |
+| RGB LED status feedback | ✅ |
+| Web UI footer with project name, version and GitHub link | ✅ |
+
+### Hardware
+- **Board**: M5Stack Atom Lite (ESP32-PICO-D4, 240 MHz, 4 MB Flash)
+- **RS485**: M5Stack Atomic RS485 Base, UART2 RX G22 / TX G19
+- **Build** (firmware 0.13.4): Flash 83.9 % (1,100,033 B) · RAM 15.7 % (51,456 B)
+
+### Known limitations
+- Replay mode requires WiFi for CSV upload; no SD card / USB mass-storage path.
+- Replay does not loop; press Start again to replay from the beginning.
+- SPIFFS partition shared with web assets; practical CSV capacity ≈ 500 KB.
+
+### Internal build history
+Detailed per-fix entries for all development phases are recorded below under
+their internal version numbers (0.1.x – 0.13.x).
+
+---
+
+## [0.13.4] — 2026-05-05  Fix: Modbus log timestamp empty when NTP not yet synced
+
+### Fixed — firmware (`firmware/sensorEmulator/`)
+- `modbus/modbus_log.cpp` — `modbus_log_post()` only stamped log entries when
+  the wall clock was set (`time() > 2020-01-01`, i.e. NTP synced).  Before NTP
+  synced (e.g. immediately after a SPIFFS upload reboots the device) every log
+  entry had an empty `ts` field, making the **Time** column blank in the web UI.
+
+  **Fix**: when the clock is not yet set, fall back to device uptime formatted
+  as `+HH:MM:SS` (e.g. `+00:01:23`).  The leading `+` distinguishes uptime
+  from a real wall-clock time.  Once NTP syncs, subsequent entries show the
+  full `YYYY-MM-DD HH:MM:SS` timestamp as before.
+
+---
+
+## [0.13.3] — 2026-05-05  Fix: replay event window never rendered (JSON truncation)
+
+### Fixed — firmware (`firmware/sensorEmulator/`)
+- `web/web_server.cpp` — `push_replay_window()` used 96-byte entry buffers for
+  `format_win_entry()`.  The actual worst-case JSON output per entry is
+  **103 bytes** (minimal CSV, all s200 fields `null`) up to **111 bytes** (all
+  fields present, large values), which overflowed the buffer.  `snprintf`
+  silently truncated the output, producing an invalid JSON object inside
+  `win_json`.  `JSON.parse()` in the browser threw and was swallowed by
+  `catch (_) {}`, so `handleReplayWindow` was never called and the event
+  window table stayed permanently empty.
+
+  **Fix**: entry buffers 96 → **128** bytes; `win_json` 320 → **448** bytes
+  (framing ≈ 50 chars + 3 × 128 entry chars + margin).
+
+  Stack delta in `push_replay_window`: +224 bytes; `WS_PUSH_STACK` (6 144 B)
+  remains adequate.
+
+---
+
+## [0.13.2] — 2026-05-05  Web UI — Replay CSV moved to own section
+
+### Changed — web UI (`firmware/data/`)
+- `data/index.html` — **Replay CSV** extracted from the System Settings
+  `<section>` and placed in its own `<section>` block positioned between the
+  S200 sensor card and System Settings.  The section now uses `<h2>Replay CSV</h2>`
+  consistent with the other top-level section headings.
+
+### Deployment
+- SPIFFS only (no firmware binary change).  Build metrics unchanged.
+
+---
+
+## [0.13.1] — 2026-05-05  Stack overflow fix — `ws_push` canary
+
+### Fixed — firmware (`firmware/sensorEmulator/`)
+- `web/web_server.cpp` — `ws_push_task` crashed on the first `push_replay_window()`
+  call with **Stack canary watchpoint triggered (ws_push)**.  The new Phase 13
+  replay-window push added ≈ 1 100 bytes of stack locals (3 × 150-byte entry
+  buffers + 512-byte `win_json` + 3 `replay_window_entry_t`) on top of the
+  existing ≈ 1 200 bytes used by `build_status_json` and the log drain loop,
+  exceeding the 4 096-byte limit.
+
+  **Fix** (three changes):
+  1. `WS_PUSH_STACK` 4 096 → **6 144** bytes.
+  2. `push_replay_window()` entry buffers 150 → **96** bytes; `win_json`
+     512 → **320** bytes (maximum actual output fits comfortably).
+  3. `char json[STATUS_JSON_MAX]` in `ws_push_task` changed to
+     **`static char`** — moves the 1 024-byte status buffer off the stack
+     into BSS.
+
+### Build metrics (after 0.13.1)
+- Flash: **83.9 %** (1,099,937 / 1,310,720 B)
+- RAM:   **15.7 %** (51,456 / 327,680 B)  *(+1 024 B BSS vs 0.13.0 — static json buffer)*
+
+---
+
+## [0.13.0] — 2026-05-05  Phase 13 — Replay Mode Redesign
+
+### Added — firmware (`firmware/sensorEmulator/`)
+- `tasks/replay_task.h` — complete rewrite.
+  - New state `REPLAY_PAUSED = 2` (DONE now = 3, ERROR = 4).
+  - New struct `replay_window_entry_t` (prev/curr/next context for the web UI table).
+  - FreeRTOS command queue API: `replay_task_cmd_start/stop/pause/play/next/prev()`.
+  - New accessors: `replay_task_get_elapsed_s()`, `replay_task_get_row_count()`,
+    `replay_task_consume_window_dirty()`, `replay_task_get_window()`.
+- `tasks/replay_task.cpp` — complete rewrite.
+  - In-memory row index (`replay_index_entry_t[2900]`, ~23 KB heap, allocated on
+    Start, freed on Stop/Done) for O(1) seeks.
+  - FreeRTOS command queue (depth 8) replaces volatile boolean flags.
+  - `RUNNING` loop uses `xTaskGetTickCount()` deadline approach for accurate 1 s
+    timer increments independent of queue-receive timeout.
+  - `PAUSED` loop blocks on queue indefinitely; supports `NEXT`/`PREV` row
+    navigation with immediate inject + window update.
+  - 3-row event window (`s_win_prev/curr/next`) protected by mutex; dirty flag
+    consumed atomically by `ws_push_task`.
+  - Row index built via full CSV scan on every Start; NTP/clock not required.
+- `util/csv_parser.h` / `util/csv_parser.cpp` — redesigned.
+  - Timestamp field `struct tm ts` → `uint32_t ts_s` (seconds 0–86 399).
+  - `CSV_MAX_LINE` 160 → 200.
+  - Added `csv_tell(p)` — returns file offset of most recently parsed row.
+  - Added `csv_seek(p, offset, row_out)` — seek + re-parse for random access.
+  - Added `#include <stddef.h>` for `size_t`.
+  - Removed `#include <time.h>`; timestamp parsed with `sscanf` → no NTP dependency.
+
+### Added — web server (`firmware/sensorEmulator/web/web_server.cpp`)
+- `STATUS_JSON_MAX` 768 → 1 024.
+- `build_status_json()` replay block adds `"paused"` state, `row_count`, `elapsed_s`.
+- `handle_replay_control()` expanded from 2 to 6 actions (`start/stop/pause/play/next/prev`);
+  response includes `row` and `elapsed_s`.
+- `format_win_entry()` — formats one `replay_window_entry_t` as a JSON object
+  (or `"null"`), with `ts` as `HH:MM:SS` string and sensor values as floats or `null`.
+- `push_replay_window()` — builds and broadcasts a `{"type":"replay_window",...}` frame.
+- `ws_push_task` — after log drain, calls `replay_task_consume_window_dirty()`
+  and `push_replay_window()` when dirty.
+
+### Added — web UI (`firmware/data/`)
+- `data/index.html` — replay section replaced:
+  - 5-button transport row: Start / ◀◀ Prev / ⏸ Pause / ▶▶ Next / ■ Stop.
+  - `<p id="replay-elapsed">` for elapsed timer display.
+  - `<div id="replay-window">` with 3-row event window table
+    (Time / marker / Temp / Hum / Spd / Dir / Heat).
+- `data/app.js` — replay transport rewritten:
+  - `_replayState` module-level string variable.
+  - `fmtElapsed(sec)` → `HH:MM:SS` string.
+  - `handleReplayStatus(r)` — updates all 5 button states, elapsed display,
+    window visibility; handles `atFirst`/`atLast` for Prev/Next disabled state.
+  - `replayCmd(action)` — fetch POST `/replay/control`.
+  - `replayTogglePause()` — sends `play` or `pause` based on `_replayState`.
+  - `handleReplayWindow(msg)` — renders 3-row window table; `null` sensor
+    values show `—`.
+  - `ws.onmessage` extended: `replay_window` type dispatched to `handleReplayWindow`.
+- `data/style.css` — added `.replay-controls`, `#replay-win-tbl` table styles,
+  `tr.replay-curr` highlight.
+
+### Changed — web mock (`webMock/server.py`)
+- `_state` extended: `replay_elapsed_s`, `replay_row_count`.
+- `_parse_csv(data_bytes)` — parses HH:MM:SS timestamps and float sensor fields;
+  returns list of row dicts.
+- `_build_window_entry(rows, idx)` — returns window entry dict or `None`.
+- `replay_upload()` — parses CSV on upload; caches in `_replay_rows`; sets
+  `replay_row_count`.
+- `_push_thread()` — increments `replay_elapsed_s` each second when running;
+  advances row; pushes `replay_window` WS event on row change.
+- `replay_control()` — handles all 6 actions; pushes `replay_window` for nav
+  commands.
+
+### Changed — firmware
+- `sensorEmulator/main.cpp` — boot banner → "Phase 13 Replay Redesign".
+
+### Build metrics (0.13.0, before stack fix)
+- Flash: **83.9 %** (1,099,973 / 1,310,720 B)
+- RAM:   **15.4 %** (50,432 / 327,680 B)
+
+---
+
 ## [0.12.3] — 2026-05-05  Web UI Conflict Guard + Web Mock Sync
 
 ### Added — web UI (`firmware/data/`)

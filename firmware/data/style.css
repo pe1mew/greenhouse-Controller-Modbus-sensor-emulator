@@ -227,3 +227,44 @@ code { background: #0d1b2a; padding: 1px 4px; border-radius: 3px; }
 #log-tbl th:nth-child(2), #log-tbl td:nth-child(2) { width: 42px;  min-width: 42px;  max-width: 42px; }
 
 #log-tbl tr:nth-child(even) { background: rgba(255,255,255,.03); }
+
+/* ── Replay transport controls ───────────────────────────────────── */
+.replay-controls { flex-wrap: wrap; gap: .4rem; }
+
+/* ── Replay event window ─────────────────────────────────────────── */
+#replay-win-tbl {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: .8rem;
+  margin-top: .3rem;
+}
+#replay-win-tbl th, #replay-win-tbl td {
+  border: 1px solid #2a2a4a;
+  padding: 3px 6px;
+  text-align: center;
+}
+#replay-win-tbl th:first-child, #replay-win-tbl td:first-child {
+  text-align: left;
+  width: 72px;
+}
+#replay-win-tbl th:nth-child(2), #replay-win-tbl td:nth-child(2) {
+  width: 24px;
+}
+tr.replay-curr { background: rgba(52,152,219,.22); font-weight: 600; }
+
+/* ── Footer ──────────────────────────────────────────────────────── */
+footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 2rem;
+  padding: .6rem 0;
+  border-top: 1px solid var(--accent);
+  font-size: .75rem;
+  color: var(--muted);
+}
+footer a {
+  color: var(--muted);
+  text-decoration: none;
+}
+footer a:hover { color: var(--fg); }

@@ -1,10 +1,13 @@
 /**
  * @file csv_parser.cpp
- * @brief SPIFFS CSV reader implementation — Phase 11.
+ * @brief SPIFFS CSV reader implementation — Phase 13.
  *
- * Uses the Arduino SPIFFS File API for line-by-line reading.
- * The internal @c csv_parser_s struct holds a File handle, the column→field
- * mapping parsed from the header, and the file offset of the first data row.
+ * Timestamp format changed from YYYY-MM-DDTHH:MM:SS (absolute wall-clock)
+ * to HH:MM:SS (relative offset in seconds from replay start).  The
+ * struct-tm field is replaced by a plain uint32_t ts_s.
+ *
+ * Added csv_tell() and csv_seek() for O(1) random access via an external
+ * row-index array maintained by replay_task.
  */
 
 #include "csv_parser.h"
@@ -13,7 +16,6 @@
 #include <Arduino.h>
 #include <string.h>
 #include <stdlib.h>
-#include <time.h>
 
 // ---------------------------------------------------------------------------
 // Column field IDs (internal)
@@ -39,6 +41,7 @@ enum CsvField : int8_t {
 struct csv_parser_s {
     File    file;                       /**< Open SPIFFS file handle. */
     size_t  data_start;                 /**< File offset of the first data row. */
+    size_t  last_row_pos;               /**< Offset of the most recently parsed row. */
     int8_t  col_map[CSV_MAX_COLS];      /**< Maps CSV column index → CsvField. */
     int     num_cols;                   /**< Number of header columns mapped. */
 };
@@ -150,7 +153,8 @@ csv_parser_t *csv_open(const char *spiffs_path)
     }
 
     // Record offset of the first data row.
-    p->data_start = (size_t)p->file.position();
+    p->data_start   = (size_t)p->file.position();
+    p->last_row_pos = p->data_start;
     Serial.printf("[csv] Opened %s — %d columns, data starts at offset %u\n",
                   spiffs_path, p->num_cols, (unsigned)p->data_start);
     return p;
@@ -169,10 +173,14 @@ bool csv_next_row(csv_parser_t *p, csv_row_t *row_out)
 
     char line[CSV_MAX_LINE];
 
-    // Skip empty lines and comment lines.
+    // Skip empty lines and comment lines, recording position before each line.
     while (true) {
+        size_t pos_before = (size_t)p->file.position();
         if (!read_line(p->file, line, sizeof(line))) return false;
-        if (line[0] != '\0' && line[0] != '#') break;
+        if (line[0] != '\0' && line[0] != '#') {
+            p->last_row_pos = pos_before;   // byte offset of this data row
+            break;
+        }
         // If we're at EOF after a blank/comment line, return false.
         if (!p->file.available() && line[0] == '\0') return false;
     }
@@ -187,39 +195,41 @@ bool csv_next_row(csv_parser_t *p, csv_row_t *row_out)
     while (tok && col_idx < p->num_cols) {
         trim_inplace(tok);
 
-        switch (p->col_map[col_idx]) {
-            case COL_TIMESTAMP: {
-                struct tm t;
-                memset(&t, 0, sizeof(t));
-                t.tm_isdst = -1;
-                if (strptime(tok, "%Y-%m-%dT%H:%M:%S", &t) != nullptr) {
-                    row_out->ts     = t;
-                    row_out->has_ts = true;
+        // Skip empty cells — leave has_* = false.
+        if (tok[0] != '\0') {
+            switch (p->col_map[col_idx]) {
+                case COL_TIMESTAMP: {
+                    unsigned h = 0, m = 0, s = 0;
+                    if (sscanf(tok, "%u:%u:%u", &h, &m, &s) == 3
+                            && h < 24 && m < 60 && s < 60) {
+                        row_out->ts_s   = h * 3600u + m * 60u + s;
+                        row_out->has_ts = true;
+                    }
+                    break;
                 }
-                break;
+                case COL_FG_TEMP:
+                    row_out->fg_temp     = (float)atof(tok);
+                    row_out->has_fg_temp = true;
+                    break;
+                case COL_FG_HUM:
+                    row_out->fg_hum     = (float)atof(tok);
+                    row_out->has_fg_hum = true;
+                    break;
+                case COL_S200_SPD:
+                    row_out->s200_spd     = (float)atof(tok);
+                    row_out->has_s200_spd = true;
+                    break;
+                case COL_S200_DIR:
+                    row_out->s200_dir     = (float)atof(tok);
+                    row_out->has_s200_dir = true;
+                    break;
+                case COL_S200_HEAT:
+                    row_out->s200_heat     = (float)atof(tok);
+                    row_out->has_s200_heat = true;
+                    break;
+                default:
+                    break;
             }
-            case COL_FG_TEMP:
-                row_out->fg_temp     = (float)atof(tok);
-                row_out->has_fg_temp = true;
-                break;
-            case COL_FG_HUM:
-                row_out->fg_hum     = (float)atof(tok);
-                row_out->has_fg_hum = true;
-                break;
-            case COL_S200_SPD:
-                row_out->s200_spd     = (float)atof(tok);
-                row_out->has_s200_spd = true;
-                break;
-            case COL_S200_DIR:
-                row_out->s200_dir     = (float)atof(tok);
-                row_out->has_s200_dir = true;
-                break;
-            case COL_S200_HEAT:
-                row_out->s200_heat     = (float)atof(tok);
-                row_out->has_s200_heat = true;
-                break;
-            default:
-                break;
         }
 
         col_idx++;
@@ -227,6 +237,18 @@ bool csv_next_row(csv_parser_t *p, csv_row_t *row_out)
     }
 
     return true;
+}
+
+size_t csv_tell(csv_parser_t *p)
+{
+    return p ? p->last_row_pos : 0;
+}
+
+bool csv_seek(csv_parser_t *p, size_t offset, csv_row_t *row_out)
+{
+    if (!p || !p->file) return false;
+    p->file.seek((uint32_t)offset);
+    return csv_next_row(p, row_out);
 }
 
 void csv_rewind(csv_parser_t *p)

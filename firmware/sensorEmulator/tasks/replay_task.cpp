@@ -1,18 +1,13 @@
-/**
+﻿/**
  * @file replay_task.cpp
- * @brief Timestamped CSV replay task — Phase 11.
+ * @brief Relative-time CSV replay task â€” Phase 13.
  *
- * Plays back a SPIFFS CSV file row-by-row in wall-clock local time.
- * Before each row is applied, values are clamped to their physical sensor
- * ranges (design §11.1); any clamping event is printed to the serial log.
- *
- * Signal protocol (FreeRTOS task notifications):
- *   replay_task_start()  — sets s_start_req = true, calls xTaskNotifyGive
- *   replay_task_stop()   — sets s_stop_req  = true, calls xTaskNotifyGive
- *
- * The task body uses ulTaskNotifyTake(pdTRUE, ...) both to await a start
- * command (portMAX_DELAY) and as a 500 ms periodic wake-up during playback
- * so that stop requests are honoured within half a second.
+ * Redesign from Phase 11:
+ *  - Timestamps are relative offsets (HH:MM:SS) â€” no NTP required.
+ *  - In-memory row index (file_offset + ts_s per row) for O(1) seeks.
+ *  - Full transport: Start / Stop / Pause / Play / Next / Prev.
+ *  - FreeRTOS command queue replaces volatile boolean flags.
+ *  - 3-row event window shared with ws_push_task via mutex + dirty flag.
  */
 
 #include "replay_task.h"
@@ -23,40 +18,64 @@
 #include <Arduino.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
-#include <time.h>
+#include <freertos/queue.h>
+#include <freertos/semphr.h>
 #include <math.h>
 
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
 
-/** @brief Stack size in bytes for the replay task. */
-static constexpr uint32_t REPLAY_STACK = 4096;
+static constexpr uint32_t REPLAY_STACK    = 4096;
+static constexpr uint32_t CMD_QUEUE_DEPTH = 8;
+
+// ---------------------------------------------------------------------------
+// Command tokens
+// ---------------------------------------------------------------------------
+
+typedef enum : uint8_t {
+    CMD_START = 0,
+    CMD_STOP,
+    CMD_PAUSE,
+    CMD_PLAY,
+    CMD_NEXT,
+    CMD_PREV,
+} replay_cmd_t;
+
+// ---------------------------------------------------------------------------
+// Row index entry
+// ---------------------------------------------------------------------------
+
+typedef struct {
+    uint32_t file_offset;   /**< Byte offset in the SPIFFS file. */
+    uint32_t ts_s;          /**< Timestamp in seconds. */
+} replay_index_entry_t;
 
 // ---------------------------------------------------------------------------
 // Module state
 // ---------------------------------------------------------------------------
 
-static TaskHandle_t            s_handle    = nullptr;
+static TaskHandle_t          s_handle      = nullptr;
+static QueueHandle_t         s_cmd_queue   = nullptr;
+static SemaphoreHandle_t     s_win_mutex   = nullptr;
+
 static volatile replay_state_t s_state     = REPLAY_IDLE;
-static volatile bool           s_start_req = false;
-static volatile bool           s_stop_req  = false;
 static volatile int            s_row_index = -1;
+static volatile uint32_t       s_elapsed_s = 0;
+static volatile int            s_row_count = 0;
+
+static replay_index_entry_t   *s_index     = nullptr;
+
+// Window data (protected by s_win_mutex).
+static replay_window_entry_t   s_win_prev;
+static replay_window_entry_t   s_win_curr;
+static replay_window_entry_t   s_win_next;
+static volatile bool           s_window_dirty = false;
 
 // ---------------------------------------------------------------------------
 // Clamping helper
 // ---------------------------------------------------------------------------
 
-/**
- * @brief Convert @p v by @p scale, round, clamp to [@p lo, @p hi].
- *
- * @param v           Physical value.
- * @param scale       Multiplier (e.g. 10.0 for FG6485A, 1000.0 for S200).
- * @param lo          Minimum raw value (inclusive).
- * @param hi          Maximum raw value (inclusive).
- * @param clamped_out Set to @c true if the value was adjusted.
- * @return            Raw int32_t register value.
- */
 static inline int32_t to_raw(float v, float scale,
                               int32_t lo, int32_t hi, bool *clamped_out)
 {
@@ -70,12 +89,6 @@ static inline int32_t to_raw(float v, float scale,
 // Row injection
 // ---------------------------------------------------------------------------
 
-/**
- * @brief Clamp and inject all present fields from @p row into g_sensor_state.
- *
- * Only sensors whose mode is @c SENSOR_MODE_REPLAY at the time of injection
- * are updated.
- */
 static void inject_row(const csv_row_t *row)
 {
     bool clamped = false;
@@ -87,10 +100,8 @@ static void inject_row(const csv_row_t *row)
             int32_t raw = to_raw(row->fg_temp, 10.0f,
                                   FG6485A_TEMP_RAW_MIN, FG6485A_TEMP_RAW_MAX,
                                   &clamped);
-            if (clamped) {
-                Serial.printf("[replay] fg_temp clamped: %.1f → %.1f °C\n",
-                              row->fg_temp, raw / 10.0f);
-            }
+            if (clamped) Serial.printf("[replay] fg_temp clamped: %.1f\xc2\xb0""C\n",
+                                       raw / 10.0f);
             g_sensor_state.fg_temperature = (int16_t)raw;
         }
         if (row->has_fg_hum) {
@@ -98,10 +109,8 @@ static void inject_row(const csv_row_t *row)
                                   (int32_t)FG6485A_HUM_RAW_MIN,
                                   (int32_t)FG6485A_HUM_RAW_MAX,
                                   &clamped);
-            if (clamped) {
-                Serial.printf("[replay] fg_hum clamped: %.1f → %.1f %%RH\n",
-                              row->fg_hum, raw / 10.0f);
-            }
+            if (clamped) Serial.printf("[replay] fg_hum clamped: %.1f %%RH\n",
+                                       raw / 10.0f);
             g_sensor_state.fg_humidity = (uint16_t)raw;
         }
     }
@@ -109,42 +118,141 @@ static void inject_row(const csv_row_t *row)
     if (g_sensor_state.s200_mode == SENSOR_MODE_REPLAY) {
         if (row->has_s200_spd) {
             int32_t raw = to_raw(row->s200_spd, 1000.0f,
-                                  S200_SPD_RAW_MIN, S200_SPD_RAW_MAX,
-                                  &clamped);
-            if (clamped) {
-                Serial.printf("[replay] s200_spd clamped: %.3f → %.3f m/s\n",
-                              row->s200_spd, raw / 1000.0f);
-            }
+                                  S200_SPD_RAW_MIN, S200_SPD_RAW_MAX, &clamped);
+            if (clamped) Serial.printf("[replay] s200_spd clamped: %.3f m/s\n",
+                                       raw / 1000.0f);
             g_sensor_state.s200_spd_min =
             g_sensor_state.s200_spd_max =
             g_sensor_state.s200_spd_avg = raw;
         }
         if (row->has_s200_dir) {
             int32_t raw = to_raw(row->s200_dir, 1000.0f,
-                                  S200_DIR_RAW_MIN, S200_DIR_RAW_MAX,
-                                  &clamped);
-            if (clamped) {
-                Serial.printf("[replay] s200_dir clamped: %.3f → %.3f °\n",
-                              row->s200_dir, raw / 1000.0f);
-            }
+                                  S200_DIR_RAW_MIN, S200_DIR_RAW_MAX, &clamped);
+            if (clamped) Serial.printf("[replay] s200_dir clamped: %.3f\xc2\xb0\n",
+                                       raw / 1000.0f);
             g_sensor_state.s200_dir_min =
             g_sensor_state.s200_dir_max =
             g_sensor_state.s200_dir_avg = raw;
         }
         if (row->has_s200_heat) {
             int32_t raw = to_raw(row->s200_heat, 1000.0f,
-                                  S200_HEAT_RAW_MIN, S200_HEAT_RAW_MAX,
-                                  &clamped);
-            if (clamped) {
-                Serial.printf("[replay] s200_heat clamped: %.3f → %.3f °C\n",
-                              row->s200_heat, raw / 1000.0f);
-            }
+                                  S200_HEAT_RAW_MIN, S200_HEAT_RAW_MAX, &clamped);
+            if (clamped) Serial.printf("[replay] s200_heat clamped: %.3f\xc2\xb0""C\n",
+                                       raw / 1000.0f);
             g_sensor_state.s200_heat_high =
             g_sensor_state.s200_heat_low  = raw;
         }
     }
 
     xSemaphoreGive(g_sensor_state.mutex);
+}
+
+// ---------------------------------------------------------------------------
+// Window helpers
+// ---------------------------------------------------------------------------
+
+static void fill_win_entry(replay_window_entry_t *e, int row,
+                            const csv_row_t *r)
+{
+    e->valid        = true;
+    e->row          = row;
+    e->ts_s         = r->has_ts ? r->ts_s : s_index[row].ts_s;
+    e->fg_temp      = r->fg_temp;  e->has_fg_temp  = r->has_fg_temp;
+    e->fg_hum       = r->fg_hum;   e->has_fg_hum   = r->has_fg_hum;
+    e->s200_spd     = r->s200_spd; e->has_s200_spd = r->has_s200_spd;
+    e->s200_dir     = r->s200_dir; e->has_s200_dir = r->has_s200_dir;
+    e->s200_heat    = r->s200_heat;e->has_s200_heat= r->has_s200_heat;
+}
+
+/** Update the shared window; called from replay task only. */
+static void update_window(csv_parser_t *csv, int curr_row,
+                           const csv_row_t *curr_data)
+{
+    replay_window_entry_t tmp_prev = {}, tmp_curr = {}, tmp_next = {};
+
+    if (curr_row > 0) {
+        csv_row_t r;
+        if (csv_seek(csv, (size_t)s_index[curr_row - 1].file_offset, &r)) {
+            fill_win_entry(&tmp_prev, curr_row - 1, &r);
+        }
+    }
+
+    fill_win_entry(&tmp_curr, curr_row, curr_data);
+
+    if (curr_row + 1 < s_row_count) {
+        csv_row_t r;
+        if (csv_seek(csv, (size_t)s_index[curr_row + 1].file_offset, &r)) {
+            fill_win_entry(&tmp_next, curr_row + 1, &r);
+        }
+    }
+
+    xSemaphoreTake(s_win_mutex, portMAX_DELAY);
+    s_win_prev     = tmp_prev;
+    s_win_curr     = tmp_curr;
+    s_win_next     = tmp_next;
+    s_window_dirty = true;
+    xSemaphoreGive(s_win_mutex);
+}
+
+// ---------------------------------------------------------------------------
+// Command dispatch (called within the task body)
+// ---------------------------------------------------------------------------
+
+static void dispatch_cmd(replay_cmd_t cmd, bool *stopped_out,
+                         int *next_inject, csv_parser_t *csv)
+{
+    switch (cmd) {
+        case CMD_STOP:
+            *stopped_out = true;
+            break;
+
+        case CMD_PAUSE:
+            if (s_state == REPLAY_RUNNING) {
+                s_state = REPLAY_PAUSED;
+                Serial.println("[replay] Paused");
+            }
+            break;
+
+        case CMD_PLAY:
+            if (s_state == REPLAY_PAUSED) {
+                s_state = REPLAY_RUNNING;
+                Serial.println("[replay] Resumed");
+            }
+            break;
+
+        case CMD_NEXT:
+            if (s_state == REPLAY_PAUSED && s_row_index + 1 < s_row_count) {
+                int nxt = s_row_index + 1;
+                csv_row_t r;
+                if (csv && csv_seek(csv, (size_t)s_index[nxt].file_offset, &r)) {
+                    inject_row(&r);
+                    update_window(csv, nxt, &r);
+                }
+                s_row_index  = nxt;
+                s_elapsed_s  = s_index[nxt].ts_s;
+                *next_inject = nxt + 1;
+                Serial.printf("[replay] Next -> row %d\n", nxt);
+            }
+            break;
+
+        case CMD_PREV:
+            if (s_state == REPLAY_PAUSED && s_row_index > 0) {
+                int prv = s_row_index - 1;
+                csv_row_t r;
+                if (csv && csv_seek(csv, (size_t)s_index[prv].file_offset, &r)) {
+                    inject_row(&r);
+                    update_window(csv, prv, &r);
+                }
+                s_row_index  = prv;
+                s_elapsed_s  = s_index[prv].ts_s;
+                *next_inject = prv + 1;
+                Serial.printf("[replay] Prev -> row %d\n", prv);
+            }
+            break;
+
+        default:
+            break;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -155,27 +263,26 @@ static void replay_task_body(void * /*arg*/)
 {
     for (;;) {
         // ------------------------------------------------------------------
-        // IDLE: wait for a start request.
+        // IDLE: reset all state, wait for CMD_START.
         // ------------------------------------------------------------------
-        s_state     = REPLAY_IDLE;
-        s_row_index = -1;
+        s_state        = REPLAY_IDLE;
+        s_row_index    = -1;
+        s_elapsed_s    = 0;
+        s_row_count    = 0;
+        s_window_dirty = false;
+        xSemaphoreTake(s_win_mutex, portMAX_DELAY);
+        memset(&s_win_prev, 0, sizeof(s_win_prev));
+        memset(&s_win_curr, 0, sizeof(s_win_curr));
+        memset(&s_win_next, 0, sizeof(s_win_next));
+        xSemaphoreGive(s_win_mutex);
 
-        while (!s_start_req) {
-            ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-            if (s_stop_req) s_stop_req = false;  // discard stop when not running
-        }
-        s_start_req = false;
-        s_stop_req  = false;
-
-        // ------------------------------------------------------------------
-        // Pre-flight: system clock must be plausibly set (> 2020-01-01).
-        // ------------------------------------------------------------------
-        time_t now = time(NULL);
-        if (now < 1577836800LL) {
-            Serial.println("[replay] Clock not set — cannot start");
-            s_state = REPLAY_ERROR;
-            vTaskDelay(pdMS_TO_TICKS(2000));  // brief pause so the UI sees ERROR
-            continue;
+        {
+            replay_cmd_t cmd;
+            while (true) {
+                xQueueReceive(s_cmd_queue, &cmd, portMAX_DELAY);
+                if (cmd == CMD_START) break;
+                // Discard all other commands while IDLE.
+            }
         }
 
         // ------------------------------------------------------------------
@@ -199,80 +306,125 @@ static void replay_task_body(void * /*arg*/)
         }
 
         // ------------------------------------------------------------------
-        // Seek to first row with timestamp >= now.
+        // Build row index.
         // ------------------------------------------------------------------
-        csv_row_t row;
-        bool found = false;
-        now = time(NULL);  // refresh after file open
-        while (csv_next_row(csv, &row)) {
-            if (row.has_ts) {
-                struct tm ts_copy = row.ts;
-                if (mktime(&ts_copy) >= now) {
-                    found = true;
-                    break;
-                }
-            }
-        }
-
-        if (!found) {
-            Serial.println("[replay] No future rows in CSV");
+        if (s_index) { free(s_index); s_index = nullptr; }
+        s_index = (replay_index_entry_t *)malloc(
+                        REPLAY_MAX_ROWS * sizeof(replay_index_entry_t));
+        if (!s_index) {
+            Serial.println("[replay] OOM building row index");
             csv_close(csv);
-            s_state = REPLAY_DONE;
+            s_state = REPLAY_ERROR;
             vTaskDelay(pdMS_TO_TICKS(2000));
             continue;
+        }
+
+        int count = 0;
+        csv_row_t row;
+        while (csv_next_row(csv, &row) && count < REPLAY_MAX_ROWS) {
+            s_index[count].file_offset = (uint32_t)csv_tell(csv);
+            s_index[count].ts_s        = row.has_ts ? row.ts_s : 0u;
+            count++;
+        }
+        s_row_count = count;
+
+        if (count == 0) {
+            Serial.println("[replay] CSV has no data rows");
+            csv_close(csv);
+            free(s_index); s_index = nullptr;
+            s_state = REPLAY_ERROR;
+            vTaskDelay(pdMS_TO_TICKS(2000));
+            continue;
+        }
+        Serial.printf("[replay] Index built: %d rows\n", count);
+
+        // ------------------------------------------------------------------
+        // Begin playback.
+        // ------------------------------------------------------------------
+        s_state     = REPLAY_RUNNING;
+        s_elapsed_s = 0;
+        s_row_index = -1;
+        int  next_inject = 0;
+        bool stopped     = false;
+
+        // Inject any rows at ts_s == 0 immediately.
+        while (next_inject < s_row_count &&
+               s_index[next_inject].ts_s == 0) {
+            csv_row_t r;
+            if (csv_seek(csv, (size_t)s_index[next_inject].file_offset, &r)) {
+                inject_row(&r);
+                s_row_index = next_inject;
+                update_window(csv, next_inject, &r);
+                Serial.printf("[replay] Row %d injected (t=0)\n", next_inject);
+            }
+            next_inject++;
         }
 
         // ------------------------------------------------------------------
         // Main playback loop.
         // ------------------------------------------------------------------
-        s_state = REPLAY_RUNNING;
-        int row_num  = 0;
-        bool stopped = false;
-
-        do {
-            // Check for stop request at the top of each row iteration.
-            if (s_stop_req) {
-                s_stop_req = false;
-                stopped    = true;
-                break;
-            }
-
-            // Wait for row timestamp, checking for stop every 500 ms.
-            if (row.has_ts) {
-                struct tm ts_copy = row.ts;
-                time_t row_t = mktime(&ts_copy);
-                while (time(NULL) < row_t) {
-                    if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(500)) != 0) {
-                        if (s_stop_req) {
-                            s_stop_req = false;
-                            stopped    = true;
-                            break;
-                        }
+        for (;;) {
+            if (s_state == REPLAY_RUNNING) {
+                // Wait up to 1 s for a command, tracking actual elapsed time.
+                TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(1000);
+                replay_cmd_t cmd;
+                while (s_state == REPLAY_RUNNING && !stopped) {
+                    TickType_t now     = xTaskGetTickCount();
+                    TickType_t remain  = deadline - now;
+                    // remain wraps if deadline passed; cap to 0.
+                    if (remain > pdMS_TO_TICKS(1000)) remain = 0;
+                    if (remain == 0) break;
+                    if (xQueueReceive(s_cmd_queue, &cmd, remain) == pdTRUE) {
+                        dispatch_cmd(cmd, &stopped, &next_inject, csv);
                     }
                 }
+                if (stopped) break;
+
+                // Advance timer only if still RUNNING after processing cmds.
+                if (s_state == REPLAY_RUNNING) {
+                    s_elapsed_s++;
+
+                    // Inject all rows whose ts_s <= elapsed_s.
+                    while (next_inject < s_row_count &&
+                           s_index[next_inject].ts_s <= s_elapsed_s) {
+                        csv_row_t r;
+                        if (csv_seek(csv,
+                                (size_t)s_index[next_inject].file_offset, &r)) {
+                            inject_row(&r);
+                            s_row_index = next_inject;
+                            update_window(csv, next_inject, &r);
+                            Serial.printf("[replay] Row %d injected (t=%us)\n",
+                                          next_inject, (unsigned)s_elapsed_s);
+                        }
+                        next_inject++;
+                    }
+
+                    // Check for end of file.
+                    if (next_inject >= s_row_count) {
+                        Serial.println("[replay] Playback complete (EOF)");
+                        break;
+                    }
+                }
+
+            } else {
+                // PAUSED: block until a command arrives.
+                replay_cmd_t cmd;
+                xQueueReceive(s_cmd_queue, &cmd, portMAX_DELAY);
+                dispatch_cmd(cmd, &stopped, &next_inject, csv);
+                if (stopped) break;
             }
-
-            if (stopped) break;
-
-            // Inject row and advance row counter.
-            s_row_index = row_num;
-            inject_row(&row);
-            Serial.printf("[replay] Row %d injected\n", row_num);
-            row_num++;
-
-        } while (csv_next_row(csv, &row));
+        }
 
         csv_close(csv);
+        csv = nullptr;
+        if (s_index) { free(s_index); s_index = nullptr; }
 
         if (stopped) {
-            Serial.println("[replay] Stopped by request");
-            s_state     = REPLAY_IDLE;
-            s_row_index = -1;
+            Serial.println("[replay] Stopped");
+            // s_state reset to IDLE at top of outer for(;;).
         } else {
-            Serial.println("[replay] Playback complete (EOF)");
-            s_state     = REPLAY_DONE;
-            s_row_index = -1;
-            vTaskDelay(pdMS_TO_TICKS(2000));  // hold DONE visible briefly
+            s_state = REPLAY_DONE;
+            vTaskDelay(pdMS_TO_TICKS(2000));  // hold DONE briefly
         }
     }
 }
@@ -283,31 +435,48 @@ static void replay_task_body(void * /*arg*/)
 
 void replay_task_init(void)
 {
+    s_cmd_queue = xQueueCreate(CMD_QUEUE_DEPTH, sizeof(uint8_t));
+    s_win_mutex = xSemaphoreCreateMutex();
     xTaskCreate(replay_task_body, "replay", REPLAY_STACK, nullptr,
                 tskIDLE_PRIORITY + 1, &s_handle);
 }
 
-void replay_task_start(void)
+static void send_cmd(replay_cmd_t cmd)
 {
-    if (!s_handle) return;
-    if (s_state == REPLAY_RUNNING) return;
-    s_start_req = true;
-    xTaskNotifyGive(s_handle);
+    if (!s_cmd_queue) return;
+    uint8_t c = (uint8_t)cmd;
+    xQueueSend(s_cmd_queue, &c, 0);
 }
 
-void replay_task_stop(void)
+void replay_task_cmd_start(void) { send_cmd(CMD_START); }
+void replay_task_cmd_stop(void)  { send_cmd(CMD_STOP);  }
+void replay_task_cmd_pause(void) { send_cmd(CMD_PAUSE); }
+void replay_task_cmd_play(void)  { send_cmd(CMD_PLAY);  }
+void replay_task_cmd_next(void)  { send_cmd(CMD_NEXT);  }
+void replay_task_cmd_prev(void)  { send_cmd(CMD_PREV);  }
+
+replay_state_t replay_task_get_state(void)    { return s_state;     }
+int            replay_task_get_row(void)       { return s_row_index; }
+uint32_t       replay_task_get_elapsed_s(void) { return s_elapsed_s; }
+int            replay_task_get_row_count(void) { return s_row_count; }
+
+bool replay_task_consume_window_dirty(void)
 {
-    if (!s_handle) return;
-    s_stop_req = true;
-    xTaskNotifyGive(s_handle);  // wake task if it's sleeping
+    if (!s_window_dirty) return false;
+    xSemaphoreTake(s_win_mutex, portMAX_DELAY);
+    bool dirty     = s_window_dirty;
+    s_window_dirty = false;
+    xSemaphoreGive(s_win_mutex);
+    return dirty;
 }
 
-replay_state_t replay_task_get_state(void)
+void replay_task_get_window(replay_window_entry_t *prev_out,
+                            replay_window_entry_t *curr_out,
+                            replay_window_entry_t *next_out)
 {
-    return s_state;
-}
-
-int replay_task_get_row(void)
-{
-    return s_row_index;
+    xSemaphoreTake(s_win_mutex, portMAX_DELAY);
+    *prev_out = s_win_prev;
+    *curr_out = s_win_curr;
+    *next_out = s_win_next;
+    xSemaphoreGive(s_win_mutex);
 }

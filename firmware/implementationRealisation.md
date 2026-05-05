@@ -1438,3 +1438,97 @@ two address inputs differ.
 | Web mock `/replay/control` `start`/`stop` returns `{ok, state}` | ✅ Confirmed |
 | Web mock `/config/tz` and `/config/location` respond correctly | ✅ Confirmed |
 
+---
+
+## Phase 13 — Replay Mode Redesign ✅
+
+**Firmware version**: 0.13.1 (0.13.0 + stack-overflow hot-fix)
+**Flashed**: COM5 — ESP32-PICO-D4 MAC `14:2b:2f:a0:b7:8c`
+**Build metrics**: Flash 83.9 % (1,099,937 / 1,310,720 B) · RAM 15.7 % (51,456 / 327,680 B)
+
+### Design rationale
+
+Phase 11 replay was tightly coupled to the system clock: every CSV row carried
+an absolute `HH:MM:SS` local timestamp, and the task refused to start until
+NTP had synced.  This made it impractical in field conditions (no WiFi,
+no NTP) and impossible to create portable test files.
+
+The redesign switches to **relative elapsed time**: timestamps are seconds
+from the moment the user presses Start, and the task maintains its own
+monotonic timer using `xTaskGetTickCount()` deadline arithmetic.  A
+FreeRTOS command queue replaces the previous volatile boolean flags,
+enabling clean Pause / Play / Prev / Next navigation without polling.
+
+An in-memory row index (`file_offset + ts_s` per row, allocated on Start,
+freed on Stop/Done) gives O(1) random access for navigation, avoiding full
+CSV re-scans on every Prev/Next command.
+
+A 3-row event context window (prev/curr/next) is shared between the replay
+task and `ws_push_task` via a mutex and an atomic dirty flag, so the web UI
+shows the surrounding rows without adding any file-access overhead to the
+push path.
+
+### Changes implemented
+
+| File | Change |
+|------|--------|
+| `util/csv_parser.h` | Timestamp field `struct tm ts` → `uint32_t ts_s`; `CSV_MAX_LINE` 160→200; added `csv_tell()`, `csv_seek()`; added `#include <stddef.h>` for `size_t` |
+| `util/csv_parser.cpp` | Removed `strptime`; timestamp parsed with `sscanf(tok, "%u:%u:%u", &h,&m,&s)`; `last_row_pos` field tracks file offset before each read; `csv_tell()` returns `last_row_pos`; `csv_seek()` seeks then re-calls `csv_next_row` |
+| `tasks/replay_task.h` | Complete rewrite — `REPLAY_PAUSED=2`, `REPLAY_DONE=3`, `REPLAY_ERROR=4`; `replay_window_entry_t`; cmd API `replay_task_cmd_start/stop/pause/play/next/prev()`; accessors `get_elapsed_s`, `get_row_count`, `consume_window_dirty`, `get_window` |
+| `tasks/replay_task.cpp` | Complete rewrite — `replay_index_entry_t[2900]` heap array; FreeRTOS cmd queue depth 8; `s_win_mutex` for window; `dispatch_cmd()` handles all 6 cmds; RUNNING loop uses `xTaskGetTickCount()` deadline; PAUSED loop blocks on queue; immediate t=0 row injection on Start |
+| `web/web_server.cpp` | `STATUS_JSON_MAX` 768→1024; `build_status_json()` adds `paused`, `row_count`, `elapsed_s`; `handle_replay_control()` expanded to 6 actions; `format_win_entry()` and `push_replay_window()` added; `ws_push_task` calls `consume_window_dirty()` + `push_replay_window()` each cycle |
+| `data/index.html` | 5-button transport row (Start/Prev/Pause/Next/Stop); `replay-elapsed` para; `replay-window` div with 3-row table; Replay CSV moved to own `<section>` above System Settings |
+| `data/app.js` | `_replayState`; `fmtElapsed()`; `handleReplayStatus()`; `replayCmd()`; `replayTogglePause()`; `handleReplayWindow()`; `ws.onmessage` dispatches `replay_window` type |
+| `data/style.css` | `.replay-controls { flex-wrap:wrap; gap:.4rem }`, `#replay-win-tbl` border/padding/size rules, `tr.replay-curr` blue highlight |
+| `webMock/server.py` | `_parse_csv()`, `_build_window_entry()`, `_replay_rows` cache; `_state` adds `replay_elapsed_s`/`replay_row_count`; `_push_thread()` advances timer and pushes `replay_window` on row change; `replay_control()` handles all 6 actions |
+| `main.cpp` | Boot banner → "Phase 13 Replay Redesign" |
+
+### Post-flash fix — stack canary (0.13.1)
+
+On first boot after flashing 0.13.0 the device crashed with:
+
+```
+Guru Meditation Error: Core 1 panic'ed (Unhandled debug exception).
+Debug exception reason: Stack canary watchpoint triggered (ws_push)
+```
+
+`push_replay_window()` added ≈ 1 100 bytes of stack locals (3 × 150-byte
+char buffers, 512-byte `win_json`, 3 `replay_window_entry_t` structs) on top
+of the existing ≈ 1 200 bytes used by `build_status_json` and the log drain
+loop, exceeding the 4 096-byte `WS_PUSH_STACK`.
+
+| Fix | Detail |
+|-----|--------|
+| `WS_PUSH_STACK` 4 096 → 6 144 | Adequate headroom for all locals in the push cycle |
+| `push_replay_window()` entry bufs 150 → 96, `win_json` 512 → 320 | Actual worst-case output fits in 96 bytes; reduces peak demand by ≈ 600 bytes |
+| `char json[1024]` → `static char` in `ws_push_task` | Moves 1 024 bytes off the task stack into BSS |
+
+### Post-flash UI layout change (0.13.2)
+
+Replay CSV was inside the System Settings `<section>`.  Moved to its own
+`<section>` immediately after the S200 card and before System Settings,
+with `<h2>Replay CSV</h2>` consistent with the other section headings.
+
+### Hardware verification
+
+| Test | Result |
+|------|--------|
+| Boot banner shows "Phase 13 Replay Redesign" | ✅ Confirmed |
+| Device connects to WiFi and responds to Modbus requests | ✅ Confirmed (after stack fix) |
+| Replay CSV section appears between S200 and System Settings | ✅ Confirmed |
+| Upload CSV → upload status shows byte count | ⬜ Pending hardware test |
+| Start → elapsed timer increments in web UI | ⬜ Pending hardware test |
+| Pause → timer freezes; Prev/Next enabled | ⬜ Pending hardware test |
+| Next/Prev → row advances/retreats; window table updates | ⬜ Pending hardware test |
+| Modbus responses match CSV values at correct elapsed offsets | ⬜ Pending hardware test |
+| Out-of-range CSV value → serial warning, clamped value in response | ⬜ Pending hardware test |
+| Stop → state returns to Idle; window hidden | ⬜ Pending hardware test |
+
+### Deviations from plan
+
+| Plan item | Deviation |
+|-----------|-----------|
+| Row index stores `file_offset` of row start | `csv_tell()` returns `last_row_pos` recorded *before* the line is read — this is the correct seek target for `csv_seek()` to re-parse the same row |
+| `ws_push_task` stack 4 096 B | Raised to 6 144 B due to `push_replay_window()` stack usage; `char json[1024]` made `static` to keep BSS cost predictable |
+| Phase 13 was originally Integration Testing | Repurposed as Replay Mode Redesign; integration testing deferred |
+

@@ -49,11 +49,11 @@
 /** @brief WebSocket push interval in milliseconds. */
 static constexpr size_t  WS_PUSH_INTERVAL_MS = 1000;
 /** @brief Stack size in bytes for the WS push task. */
-static constexpr size_t  WS_PUSH_STACK        = 4096;
+static constexpr size_t  WS_PUSH_STACK        = 6144;
 /** @brief Maximum HTTP request body size in bytes. */
 static constexpr size_t  HTTP_BODY_MAX         = 512;
 /** @brief Maximum size of a status JSON frame in bytes. */
-static constexpr size_t  STATUS_JSON_MAX       = 768;
+static constexpr size_t  STATUS_JSON_MAX       = 1024;
 /** @brief Maximum number of simultaneous WebSocket clients. */
 static constexpr size_t  MAX_WS_CLIENTS        = 8;
 
@@ -347,12 +347,15 @@ static void build_status_json(char *buf, size_t buf_size)
 
     replay_state_t rs = replay_task_get_state();
     const char *rs_str = (rs == REPLAY_RUNNING) ? "running"
+                       : (rs == REPLAY_PAUSED)  ? "paused"
                        : (rs == REPLAY_DONE)    ? "done"
                        : (rs == REPLAY_ERROR)   ? "error"
                                                 : "idle";
     cJSON *rpl = cJSON_CreateObject();
-    cJSON_AddStringToObject(rpl, "state", rs_str);
-    cJSON_AddNumberToObject(rpl, "row",   replay_task_get_row());
+    cJSON_AddStringToObject(rpl, "state",     rs_str);
+    cJSON_AddNumberToObject(rpl, "row",       replay_task_get_row());
+    cJSON_AddNumberToObject(rpl, "row_count", replay_task_get_row_count());
+    cJSON_AddNumberToObject(rpl, "elapsed_s", (double)replay_task_get_elapsed_s());
     cJSON_AddItemToObject(root, "replay", rpl);
 
     char *str = cJSON_PrintUnformatted(root);
@@ -862,8 +865,8 @@ static esp_err_t handle_replay_upload(httpd_req_t *req)
     }
 
     // Stop any running replay before overwriting the file.
-    replay_task_stop();
-    vTaskDelay(pdMS_TO_TICKS(100));  // allow task to see the stop flag
+    replay_task_cmd_stop();
+    vTaskDelay(pdMS_TO_TICKS(200));  // allow task to reach IDLE
 
     // Remove stale file so SPIFFS reclaims the space.
     if (SPIFFS.exists("/replay.csv")) {
@@ -941,22 +944,30 @@ static esp_err_t handle_replay_control(httpd_req_t *req)
 
     cJSON *j_action = cJSON_GetObjectItem(root, "action");
     if (cJSON_IsString(j_action)) {
-        if (strcmp(j_action->valuestring, "start") == 0) {
-            replay_task_start();
-            Serial.println("[web/replay] Start requested");
-        } else if (strcmp(j_action->valuestring, "stop") == 0) {
-            replay_task_stop();
-            Serial.println("[web/replay] Stop requested");
-        }
+        const char *a = j_action->valuestring;
+        if      (strcmp(a, "start") == 0) { replay_task_cmd_start(); Serial.println("[web/replay] Start"); }
+        else if (strcmp(a, "stop")  == 0) { replay_task_cmd_stop();  Serial.println("[web/replay] Stop");  }
+        else if (strcmp(a, "pause") == 0) { replay_task_cmd_pause(); Serial.println("[web/replay] Pause"); }
+        else if (strcmp(a, "play")  == 0) { replay_task_cmd_play();  Serial.println("[web/replay] Play");  }
+        else if (strcmp(a, "next")  == 0) { replay_task_cmd_next();  Serial.println("[web/replay] Next");  }
+        else if (strcmp(a, "prev")  == 0) { replay_task_cmd_prev();  Serial.println("[web/replay] Prev");  }
     }
     cJSON_Delete(root);
 
-    replay_state_t rs = replay_task_get_state();
-    const char *rs_str = (rs == REPLAY_RUNNING) ? "running" : "idle";
+    // Brief yield so the task can process the command before we read back state.
+    vTaskDelay(pdMS_TO_TICKS(20));
 
+    replay_state_t rs = replay_task_get_state();
+    const char *rs_str = (rs == REPLAY_RUNNING) ? "running"
+                       : (rs == REPLAY_PAUSED)  ? "paused"
+                       : (rs == REPLAY_DONE)    ? "done"
+                       : (rs == REPLAY_ERROR)   ? "error"
+                                                : "idle";
     cJSON *resp = cJSON_CreateObject();
-    cJSON_AddBoolToObject(resp,   "ok",    1);
-    cJSON_AddStringToObject(resp, "state", rs_str);
+    cJSON_AddBoolToObject(resp,   "ok",       1);
+    cJSON_AddStringToObject(resp, "state",    rs_str);
+    cJSON_AddNumberToObject(resp, "row",      replay_task_get_row());
+    cJSON_AddNumberToObject(resp, "elapsed_s",(double)replay_task_get_elapsed_s());
     char *resp_str = cJSON_PrintUnformatted(resp);
     cJSON_Delete(resp);
     httpd_resp_set_type(req, "application/json");
@@ -987,6 +998,76 @@ static esp_err_t handle_post_log_clear(httpd_req_t *req)
 }
 
 // ---------------------------------------------------------------------------
+// Replay event window push
+// ---------------------------------------------------------------------------
+
+/**
+ * @brief Format one replay window entry as a JSON object (or "null").
+ *
+ * @param buf    Destination buffer.
+ * @param bufsz  Size of @p buf in bytes.
+ * @param e      Entry to format; if @c valid is @c false, writes "null".
+ * @return       Number of bytes written (excluding null terminator).
+ */
+static int format_win_entry(char *buf, int bufsz,
+                             const replay_window_entry_t *e)
+{
+    if (!e || !e->valid) return snprintf(buf, bufsz, "null");
+
+    char ts[9];
+    snprintf(ts, sizeof(ts), "%02u:%02u:%02u",
+             (unsigned)(e->ts_s / 3600u),
+             (unsigned)(e->ts_s % 3600u / 60u),
+             (unsigned)(e->ts_s % 60u));
+
+    char fg_temp_s[10], fg_hum_s[10], spd_s[10], dir_s[10], heat_s[10];
+    if (e->has_fg_temp)   snprintf(fg_temp_s, sizeof(fg_temp_s), "%.1f", e->fg_temp);
+    else                  strcpy(fg_temp_s, "null");
+    if (e->has_fg_hum)    snprintf(fg_hum_s,  sizeof(fg_hum_s),  "%.1f", e->fg_hum);
+    else                  strcpy(fg_hum_s,  "null");
+    if (e->has_s200_spd)  snprintf(spd_s,    sizeof(spd_s),      "%.1f", e->s200_spd);
+    else                  strcpy(spd_s,     "null");
+    if (e->has_s200_dir)  snprintf(dir_s,    sizeof(dir_s),      "%.1f", e->s200_dir);
+    else                  strcpy(dir_s,     "null");
+    if (e->has_s200_heat) snprintf(heat_s,   sizeof(heat_s),     "%.1f", e->s200_heat);
+    else                  strcpy(heat_s,    "null");
+
+    return snprintf(buf, bufsz,
+        "{\"row\":%d,\"ts\":\"%s\","
+        "\"fg_temp\":%s,\"fg_hum\":%s,"
+        "\"s200_spd\":%s,\"s200_dir\":%s,\"s200_heat\":%s}",
+        e->row, ts, fg_temp_s, fg_hum_s, spd_s, dir_s, heat_s);
+}
+
+/**
+ * @brief Build and broadcast a @c replay_window WebSocket event.
+ *
+ * Called by ws_push_task when replay_task_consume_window_dirty() returns
+ * true.  Uses a stack-allocated 512-byte buffer; no heap allocation.
+ */
+static void push_replay_window(void)
+{
+    replay_window_entry_t prev, curr, next;
+    replay_task_get_window(&prev, &curr, &next);
+
+    // Each entry buf must hold the worst-case format_win_entry output:
+    //   {"row":2899,"ts":"23:59:59","fg_temp":-40.0,"fg_hum":99.9,
+    //    "s200_spd":60.0,"s200_dir":360.0,"s200_heat":-40.0}
+    // = ~111 chars + null → 128 bytes is safe.
+    char prev_s[128], curr_s[128], next_s[128];
+    format_win_entry(prev_s, sizeof(prev_s), &prev);
+    format_win_entry(curr_s, sizeof(curr_s), &curr);
+    format_win_entry(next_s, sizeof(next_s), &next);
+
+    // win_json framing overhead = ~50 chars; 3 * 128 + 50 + margin = 448.
+    char win_json[448];
+    snprintf(win_json, sizeof(win_json),
+             "{\"type\":\"replay_window\",\"prev\":%s,\"curr\":%s,\"next\":%s}",
+             prev_s, curr_s, next_s);
+    ws_broadcast(win_json, strlen(win_json));
+}
+
+// ---------------------------------------------------------------------------
 // WebSocket push task
 // ---------------------------------------------------------------------------
 
@@ -1000,7 +1081,7 @@ static esp_err_t handle_post_log_clear(httpd_req_t *req)
  */
 static void ws_push_task(void * /*arg*/)
 {
-    char json[STATUS_JSON_MAX];
+    static char json[STATUS_JSON_MAX];  // static: keep off task stack
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(WS_PUSH_INTERVAL_MS));
         if (!s_server) continue;
@@ -1020,6 +1101,11 @@ static void ws_push_task(void * /*arg*/)
                      "{\"type\":\"log\",\"ts\":\"%s\",\"dir\":\"%s\",\"hex\":\"%s\",\"summary\":\"%s\"}",
                      entry.ts, entry.dir, entry.hex, entry.summary);
             ws_broadcast(log_json, strlen(log_json));
+        }
+
+        // Push replay event window if row has changed since last broadcast.
+        if (replay_task_consume_window_dirty()) {
+            push_replay_window();
         }
     }
 }

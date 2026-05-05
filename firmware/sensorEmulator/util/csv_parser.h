@@ -1,11 +1,11 @@
 /**
  * @file csv_parser.h
- * @brief Line-by-line CSV reader for SPIFFS replay files — Phase 11.
+ * @brief Line-by-line CSV reader for SPIFFS replay files — Phase 13.
  *
  * Reads a comma-separated text file from SPIFFS.  The first row is treated
  * as a header; recognised column names are:
  *
- *   timestamp  — local time string in @c YYYY-MM-DDTHH:MM:SS format
+ *   timestamp  — relative offset string in @c HH:MM:SS format (seconds from start)
  *   fg_temp    — FG6485A temperature in °C (float)
  *   fg_hum     — FG6485A humidity in %RH  (float)
  *   s200_spd   — S200 wind speed in m/s   (float)
@@ -14,19 +14,20 @@
  *
  * Unrecognised columns are silently skipped.  Sensor columns are all
  * optional; a field whose @c has_* flag is @c false means the column was
- * absent from the header and the value must not be injected.
+ * absent from the header or had an empty cell, and the value must not be
+ * injected.
  *
  * Lines beginning with @c '#' and empty lines are silently skipped.
  */
 
 #pragma once
 
+#include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
-#include <time.h>
 
 /** @brief Maximum bytes in one CSV line (including the newline character). */
-#define CSV_MAX_LINE  160
+#define CSV_MAX_LINE  200
 
 /**
  * @brief Parsed values for one CSV data row.
@@ -35,7 +36,7 @@
  * could not be parsed for this row.
  */
 typedef struct {
-    struct tm  ts;           /**< Local time parsed from the @c timestamp column. */
+    uint32_t   ts_s;         /**< Relative offset in seconds (HH:MM:SS → s). */
     bool       has_ts;       /**< @c true if timestamp was parsed successfully. */
 
     float      fg_temp;      /**< FG6485A temperature (°C). */
@@ -76,6 +77,7 @@ void csv_close(csv_parser_t *p);
  * @brief Read and parse the next data row.
  *
  * Advances the file position by one non-empty, non-comment line.
+ * The file offset of the row just parsed can be retrieved via csv_tell().
  *
  * @param p        Parser handle.
  * @param row_out  Destination struct.  All @c has_* flags are set to @c false
@@ -83,6 +85,31 @@ void csv_close(csv_parser_t *p);
  * @return         @c true if a row was parsed; @c false on EOF or error.
  */
 bool csv_next_row(csv_parser_t *p, csv_row_t *row_out);
+
+/**
+ * @brief Return the SPIFFS file offset of the most recently parsed row.
+ *
+ * This is the byte offset at which csv_next_row() found the row — i.e. the
+ * position recorded @em before the line was read.  Store this in a row-index
+ * array to enable O(1) random access via csv_seek().
+ *
+ * @param p  Parser handle.
+ * @return   File offset in bytes, or 0 if @p p is @c nullptr.
+ */
+size_t csv_tell(csv_parser_t *p);
+
+/**
+ * @brief Seek to a previously recorded file offset and parse one data row.
+ *
+ * Sets the file position to @p offset, then calls csv_next_row() internally.
+ * Used for O(1) random-access navigation (Next / Previous).
+ *
+ * @param p        Parser handle.
+ * @param offset   File offset returned by a prior csv_tell() call.
+ * @param row_out  Destination struct filled by parsing the row at @p offset.
+ * @return         @c true if the row was parsed successfully.
+ */
+bool csv_seek(csv_parser_t *p, size_t offset, csv_row_t *row_out);
 
 /**
  * @brief Rewind the parser to the first data row (immediately after the header).

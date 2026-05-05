@@ -128,6 +128,43 @@
   </div>
 </section>
 
+<!-- ── Replay CSV ───────────────────────────────────────────────── -->
+<section>
+  <h2>Replay CSV</h2>
+  <div class="row">
+    <label>CSV file</label>
+    <input type="file" id="replay-file" accept=".csv,.txt">
+  </div>
+  <button onclick="uploadReplayFile()">Upload</button>
+  <p id="replay-upload-status" class="hint"></p>
+
+  <div class="row replay-controls" style="margin-top:.75rem">
+    <button id="btn-replay-start" onclick="replayCmd('start')">&#9654; Start</button>
+    <button id="btn-replay-prev"  onclick="replayCmd('prev')"  disabled>&#9664;&#9664; Prev</button>
+    <button id="btn-replay-pause" onclick="replayTogglePause()" disabled>&#9646;&#9646; Pause</button>
+    <button id="btn-replay-next"  onclick="replayCmd('next')"  disabled>&#9654;&#9654; Next</button>
+    <button id="btn-replay-stop"  onclick="replayCmd('stop')"  disabled>&#9632; Stop</button>
+  </div>
+  <p id="replay-elapsed" class="hint"></p>
+  <p id="replay-status" class="hint"></p>
+
+  <div id="replay-window" style="display:none;margin-top:.5rem">
+    <table id="replay-win-tbl">
+      <thead>
+        <tr><th>Time</th><th></th><th>Temp</th><th>Hum</th><th>Spd</th><th>Dir</th><th>Heat</th></tr>
+      </thead>
+      <tbody>
+        <tr id="replay-win-prev"><td colspan="7">&#8212;</td></tr>
+        <tr id="replay-win-curr" class="replay-curr"><td colspan="7">&#8212;</td></tr>
+        <tr id="replay-win-next"><td colspan="7">&#8212;</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p class="hint">CSV format: <code>timestamp,fg_temp,fg_hum,s200_spd,s200_dir,s200_heat</code><br>
+    Timestamp: <code>HH:MM:SS</code> (offset from Start). Sensor columns optional. Max 2900 rows.</p>
+</section>
+
 <!-- ── System Settings ──────────────────────────────────────────── -->
 <section>
   <h2>System Settings</h2>
@@ -176,23 +213,6 @@
   <p class="hint">Used for Live mode weather fetch. Auto-detected via IP geolocation on WiFi connect, or set manually.</p>
 
   <hr>
-  <h3>Replay CSV</h3>
-  <div class="row">
-    <label>CSV file</label>
-    <input type="file" id="replay-file" accept=".csv,.txt">
-  </div>
-  <button onclick="uploadReplayFile()">Upload</button>
-  <p id="replay-upload-status" class="hint"></p>
-
-  <div class="row" style="margin-top:.75rem">
-    <button onclick="startReplay()">&#9654; Start replay</button>
-    <button onclick="stopReplay()" style="margin-left:.5rem">&#9632; Stop</button>
-  </div>
-  <p id="replay-status" class="hint"></p>
-  <p class="hint">CSV format: <code>timestamp,fg_temp,fg_hum,s200_spd,s200_dir,s200_heat</code><br>
-    Timestamp: <code>YYYY-MM-DDTHH:MM:SS</code> (local time, no Z). Sensor columns are optional.</p>
-
-  <hr>
   <h3>Manual time</h3>
   <div class="row">
     <label>Date &amp; time (local)</label>
@@ -217,5 +237,11 @@
 </section>
 
 <script src="app.js"></script>
+
+<footer>
+  <span>Greenhouse Controller Modbus Sensor Emulator &nbsp;&bull;&nbsp; v0.9.0-beta</span>
+  <a href="https://github.com/pe1mew/greenhouse-Controller-Modbus-sensor-emulator"
+     target="_blank" rel="noopener noreferrer">GitHub &nearr;</a>
+</footer>
 </body>
 </html>

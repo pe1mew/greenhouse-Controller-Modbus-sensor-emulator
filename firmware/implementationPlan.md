@@ -25,7 +25,7 @@ the Modbus core; phases 5–8 add configuration and the web interface; phases
 | 10 | Live mode — Open-Meteo fetch | ✅ Complete |
 | 11 | Replay mode — CSV playback | ✅ Complete |
 | 12 | Modbus activity log | ✅ Complete |
-| 13 | Integration testing | ⬜ Not started |
+| 13 | Replay mode redesign — relative time, transport controls, event window | ✅ Complete |
 
 ---
 
@@ -421,43 +421,48 @@ to the web UI in real time.
 
 ---
 
-## Phase 13 — Integration Testing
+## Phase 13 — Replay Mode Redesign ✅
 
-**Goal**: End-to-end verification of all features using the hardware Modbus
-master from `documentation/code_modbusTestClient/`.
+**Goal**: Replace the NTP-dependent absolute-timestamp replay with a
+relative-time system that works without a synchronised clock; add full
+transport controls (Pause / Play / Prev / Next); expose a 3-row event window
+in the web UI; remove all NTP gating from replay.
 
-### Test Cases
+### Key design decisions
 
-| ID | Description | Expected result |
-|----|-------------|-----------------|
-| IT-01 | FC03 FG6485A reg 0x0000 (humidity) | Returns manual default 500 |
-| IT-02 | FC03 FG6485A reg 0x0001 (temperature) | Returns manual default 250 |
-| IT-03 | FC04 S200 regs 0x000C–0x000D (dir avg) | Returns manual default 180 000 |
-| IT-04 | FC04 S200 regs 0x0012–0x0013 (speed avg) | Returns manual default 5 000 |
-| IT-05 | FC03 to unknown address 99 | No reply; master times out |
-| IT-06 | Frame with bad CRC | No reply; red LED blink |
-| IT-07 | FC01 (unsupported FC) to addr 1 | Exception 0x01 |
-| IT-08 | FC03 FG6485A out-of-range register | Exception 0x02 |
-| IT-09 | Manual mode: set temp to 350, query | Returns 350 |
-| IT-10 | Manual mode: value persists after reboot | Returns 350 after power cycle |
-| IT-11 | Slave address change via web UI | New address responds; old address silent |
-| IT-12 | Live mode: FG6485A temperature | Returns Open-Meteo current temperature (±5 °C) |
-| IT-13 | Live mode: S200 wind direction | Returns Open-Meteo wind direction (±45°) |
-| IT-14 | Replay mode: row advance | FC04 speed matches CSV value at correct timestamp |
-| IT-15 | Modbus log | Web UI log shows all IT-01–IT-14 frames |
-| IT-16 | WiFi AP SSID | `SensorEmulator-XXYY` (correct MAC suffix) |
-| IT-17 | mDNS | `http://sensor-emulator.local` responds when STA connected |
-| IT-18 | NTP sync | Web UI clock shows NTP-synced indicator |
-| IT-19 | Manual time set | Clock advances correctly after WiFi off |
-| IT-20 | Input clamping — web UI | POST temperature 9999 → Modbus returns 1200 (120.0 °C max); POST humidity −1 → returns 0 |
-| IT-21 | Replay clamping | CSV row with wind speed 999.999 → clamped to 60.000, warning in Modbus log |
-| IT-22 | Replay local time | CSV row with local timestamp activates at correct local moment incl. DST offset |
+| Decision | Rationale |
+|----------|-----------|
+| Timestamps as `HH:MM:SS` offset from Start | No NTP required; intuitive to create test files |
+| In-memory row index (offset + ts_s per row) | O(1) seeks for Prev/Next without re-scanning |
+| FreeRTOS command queue (depth 8) | Thread-safe commands from HTTP handlers without busy-poll |
+| `xTaskGetTickCount()` deadline in RUNNING loop | Accurate 1 s increments regardless of queue-receive timeout |
+| 3-row window with dirty flag + mutex | ws_push_task reads without blocking the replay task |
 
-### Procedure
-1. Flash firmware to Atom Lite.
-2. Connect Atom Lite RS485 Base to test client RS485 Base (A-to-A, B-to-B, GND common).
-3. Flash `documentation/code_modbusTestClient/` to a second Atom Lite (Modbus master).
-4. Execute IT-01 through IT-19 in order; record result in a test log.
+### Files
+
+| File | Action |
+|------|--------|
+| `util/csv_parser.h` | Modified — `ts_s: uint32_t`; added `csv_tell()`, `csv_seek()`; `CSV_MAX_LINE` 160→200; added `<stddef.h>` |
+| `util/csv_parser.cpp` | Modified — removed `strptime`; sscanf HH:MM:SS; `last_row_pos` tracking |
+| `tasks/replay_task.h` | Complete rewrite — new states, `replay_window_entry_t`, cmd API, accessors |
+| `tasks/replay_task.cpp` | Complete rewrite — cmd queue, row index, pause/nav, window with mutex |
+| `web/web_server.cpp` | Modified — 6-action control, `format_win_entry()`, `push_replay_window()`, `STATUS_JSON_MAX` 768→1024 |
+| `data/index.html` | Modified — 5-button transport row, elapsed timer, 3-row event window table; Replay CSV moved to own section |
+| `data/app.js` | Modified — full transport functions, `handleReplayWindow()`, `ws.onmessage` extended |
+| `data/style.css` | Modified — `.replay-controls`, `#replay-win-tbl`, `tr.replay-curr` |
+| `webMock/server.py` | Modified — `_parse_csv()`, `_build_window_entry()`, 6-action `replay_control()`, 1 Hz timer with window events |
+| `main.cpp` | Banner → "Phase 13 Replay Redesign" |
+
+### Tasks
+- [x] `csv_parser`: change timestamp to relative `uint32_t ts_s`; add `csv_tell`/`csv_seek`.
+- [x] `replay_task`: complete rewrite — cmd queue, row index, PAUSED state, Prev/Next, window.
+- [x] `web_server`: extend `/replay/control` to 6 actions; add `push_replay_window()`.
+- [x] `index.html`: 5-button transport, elapsed display, event window table.
+- [x] `app.js`: replay transport functions, `handleReplayWindow`, ws dispatch.
+- [x] `style.css`: replay transport and window styles.
+- [x] `webMock/server.py`: CSV parsing, 1 Hz timer, all 6 actions, window WS events.
+- [x] Post-flash fix: `WS_PUSH_STACK` 4096→6144; static json buffer; shrink entry bufs.
+- [x] Post-flash: Replay CSV moved to own `<section>` between sensors and System Settings.
 
 ---
 
