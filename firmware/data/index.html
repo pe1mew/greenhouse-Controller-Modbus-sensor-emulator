@@ -63,8 +63,9 @@
 
   <div class="row">
     <label>Slave address (1–247)</label>
-    <input type="number" id="fg-addr" min="1" max="247" value="1" class="short">
+    <input type="number" id="fg-addr" min="1" max="247" value="1" class="short" oninput="onAddrInput()">
     <button onclick="postFgAddr()">Apply</button>
+    <span id="fg-addr-err" class="addr-err"></span>
   </div>
 
   <div class="row">
@@ -95,8 +96,9 @@
 
   <div class="row">
     <label>Slave address (1–247)</label>
-    <input type="number" id="s200-addr" min="1" max="247" value="44" class="short">
+    <input type="number" id="s200-addr" min="1" max="247" value="44" class="short" oninput="onAddrInput()">
     <button onclick="postS200Addr()">Apply</button>
+    <span id="s200-addr-err" class="addr-err"></span>
   </div>
 
   <div class="row">

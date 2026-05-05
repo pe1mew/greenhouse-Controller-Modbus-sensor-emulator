@@ -6,6 +6,65 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ---
 
+## [0.12.3] — 2026-05-05  Web UI Conflict Guard + Web Mock Sync
+
+### Added — web UI (`firmware/data/`)
+- Slave address conflict validation: clicking Apply for a sensor address when
+  both sensors hold the same value blocks the POST and shows an inline error
+  message directly after the Apply button.  The message is cleared
+  automatically as soon as the two address inputs differ.
+  - `data/index.html` — `<span id="fg-addr-err">` / `<span id="s200-addr-err">`
+    added after each address Apply button; `oninput="onAddrInput()"` wired to
+    both address inputs.
+  - `data/app.js` — `addrConflict()`, `onAddrInput()` helpers added;
+    `postFgAddr()` and `postS200Addr()` now call `addrConflict()` before POST.
+  - `data/style.css` — `.addr-err { color: #e74c3c; font-size: .8rem;
+    margin-left: .5rem; }` added.
+
+### Changed — web mock (`webMock/server.py`)
+- Docstring updated from Phase 7 to Phase 12; full endpoint table added.
+- `_state` dict extended: `tz_posix`, `live_lat`, `live_lon`,
+  `live_fetch_age`, `live_fetch_ok`, `replay_state`, `replay_row`,
+  `replay_csv`.
+- `build_status_json()` extended to include `fg.mode`, `fg.addr`,
+  `s200.heat`, `s200.mode`, `s200.addr`, `wifi.ssid`, `live{lat,lon}`,
+  `live_fetch_age`, `live_fetch_ok`, `replay{state,row}`.
+- Log entry timestamp corrected: `%H:%M:%S` → `%Y-%m-%d %H:%M:%S`
+  (matches firmware `modbus_log.cpp`).
+- `POST /replay/upload` — was HTTP 501 stub; now stores CSV bytes in memory,
+  returns `{"ok":true,"size":N}`.
+- `POST /replay/control` — was HTTP 501 stub; now accepts
+  `{"action":"start"|"stop"}`, returns `{"ok":true,"state":"running"|"idle"}`.
+- `POST /config/tz` — new endpoint; stores POSIX TZ string, returns
+  `{"ok":true,"tz":"..."}`.
+- `POST /config/location` — new endpoint; clamps lat ±90, lon ±180; returns
+  `{"ok":true,"lat":...,"lon":...}`.
+
+---
+
+## [0.12.2] — 2026-05-05  Phase 12 — Modbus Log Stall Fix
+
+### Fixed
+- `web/web_server.cpp` — Modbus monitor stalled after several minutes while
+  all other web-UI functions continued working.  Root cause: `ws_broadcast_dyn()`
+  passed `frame.payload` pointing into a heap buffer that was freed in the same
+  callback after `httpd_ws_send_frame_async()` was queued — a use-after-free
+  that corrupted the httpd state over time.  Additionally, the per-entry cJSON
+  allocation + `httpd_queue_work` call created heap fragmentation under sustained
+  Modbus traffic.
+- Replaced the `cJSON` + `ws_broadcast_dyn` drain path with a direct
+  `snprintf` into a 320-byte stack buffer followed by `ws_broadcast()` (same
+  path used by the status JSON).  No heap allocation; no extra `httpd_queue_work`
+  call per log entry.
+- Removed `broadcast_dyn_ctx_t`, `broadcast_dyn_cb()`, and `ws_broadcast_dyn()`
+  entirely — they are no longer needed.
+
+### Build metrics (after 0.12.2)
+- Flash: **83.7 %** (1,097,305 / 1,310,720 B)  *(−232 B vs 0.12.1)*
+- RAM:   **15.3 %** (50,256 / 327,680 B)
+
+---
+
 ## [0.12.1] — 2026-05-04  Phase 12 — Modbus Log Redesign & Stack Fix
 
 ### Changed — firmware (`firmware/sensorEmulator/`)

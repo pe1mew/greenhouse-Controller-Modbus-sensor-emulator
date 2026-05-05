@@ -227,7 +227,22 @@ function post(url, body) {
 }
 
 // ── FG6485A ──────────────────────────────────────────────────────────────
+function addrConflict() {
+  const a = parseInt(document.getElementById('fg-addr').value,   10);
+  const b = parseInt(document.getElementById('s200-addr').value, 10);
+  return !isNaN(a) && !isNaN(b) && a === b;
+}
+function onAddrInput() {
+  if (!addrConflict()) {
+    document.getElementById('fg-addr-err').textContent   = '';
+    document.getElementById('s200-addr-err').textContent = '';
+  }
+}
 function postFgAddr() {
+  if (addrConflict()) {
+    document.getElementById('fg-addr-err').textContent = 'Address already used by S200';
+    return;
+  }
   const addr = parseInt(document.getElementById('fg-addr').value, 10);
   post('/config/sensor', { sensor: 'fg6485a', addr });
 }
@@ -255,6 +270,10 @@ function postFgManual() {
 
 // ── S200 ─────────────────────────────────────────────────────────────────
 function postS200Addr() {
+  if (addrConflict()) {
+    document.getElementById('s200-addr-err').textContent = 'Address already used by FG6485A';
+    return;
+  }
   const addr = parseInt(document.getElementById('s200-addr').value, 10);
   post('/config/sensor', { sensor: 's200', addr });
 }

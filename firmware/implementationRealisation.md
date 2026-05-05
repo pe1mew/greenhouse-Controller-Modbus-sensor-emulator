@@ -760,8 +760,11 @@ serving the `firmware/data/` assets directly (no copy).
 - `POST /config/wifi` — sets mode to `Connecting`, transitions to `STA` / `IP=192.168.1.100` / `RSSI=-55` after 3 s timer
 - `POST /config/ntp` — saves server; sets `ntp_synced=True` after 2 s timer
 - `POST /config/time` — stores `time.time()` offset (mirrors `settimeofday()`)
+- `POST /config/tz` — stores POSIX TZ string; returns `{ok, tz}`
+- `POST /config/location` — clamps lat ±90 / lon ±180; stores in `_state`; returns `{ok, lat, lon}`
 - `POST /log/clear` — broadcasts `{type:"log_clear"}` to all WS clients
-- `POST /replay/upload`, `POST /replay/control` — HTTP 501 stubs
+- `POST /replay/upload` — stores raw CSV bytes in memory; returns `{ok, size}`
+- `POST /replay/control` — `{action:"start"|"stop"}`; returns `{ok, state}`
 
 State is in-memory only; resets on server restart.
 
@@ -1306,9 +1309,9 @@ the CSV.
 
 ## Phase 12 — Modbus Activity Log ✅
 
-**Firmware version**: 0.12.1  
+**Firmware version**: 0.12.2  
 **Flashed**: COM5 — ESP32-PICO-D4 MAC `14:2b:2f:a0:b7:8c`  
-**Build metrics**: Flash 83.7 % (1,097,537 / 1,310,720 B) · RAM 15.3 % (50,256 / 327,680 B)
+**Build metrics**: Flash 83.7 % (1,097,305 / 1,310,720 B) · RAM 15.3 % (50,256 / 327,680 B)
 
 ### Design rationale
 
@@ -1339,7 +1342,7 @@ The implementation was redesigned to format at capture time:
 | `sensorEmulator/modbus/modbus_log.h` | **New** — `log_dir_t`; `log_entry_t` with pre-formatted string fields (`ts[20]`, `dir[3]`, `hex[96]`, `summary[64]`); API: `modbus_log_init/post/receive/clear` |
 | `sensorEmulator/modbus/modbus_log.cpp` | **New** — FreeRTOS queue (depth 8); `modbus_log_post()` formats timestamp, hex string, and summary at capture time; non-blocking `xQueueSend`; `build_summary()` decodes FC01–FC06, FC10, exception responses |
 | `sensorEmulator/modbus/modbus_slave.cpp` | Added `#include "modbus_log.h"`; `modbus_log_post(LOG_DIR_RX, …)` after CRC-valid frame; `modbus_log_post(LOG_DIR_TX, …)` before `rs485_write` |
-| `sensorEmulator/web/web_server.cpp` | Added `#include "../modbus/modbus_log.h"`; new `broadcast_dyn_ctx_t` / `broadcast_dyn_cb()` / `ws_broadcast_dyn()` for heap-string WebSocket frames; `ws_push_task` drain loop copies pre-formatted strings directly into cJSON (no large locals); `handle_post_log_clear` calls `modbus_log_clear()`; `WS_PUSH_STACK` = 4096 B |
+| `sensorEmulator/web/web_server.cpp` | Added `#include "../modbus/modbus_log.h"`; `ws_push_task` drain loop formats log JSON via `snprintf` into a 320-byte stack buffer and broadcasts via `ws_broadcast()` (no heap allocation); `handle_post_log_clear` calls `modbus_log_clear()`; `WS_PUSH_STACK` = 4096 B.  `broadcast_dyn_ctx_t` / `broadcast_dyn_cb()` / `ws_broadcast_dyn()` were introduced in 0.12.0 and removed in 0.12.2 (use-after-free stall, see below). |
 | `sensorEmulator/main.cpp` | `#include "modbus/modbus_log.h"`; `modbus_log_init()` after `sensor_state_init()`; banner → "Phase 12 Modbus Log" |
 | `data/app.js` | `LOG_MAX` 200 → 30 |
 
@@ -1362,6 +1365,76 @@ The implementation was redesigned to format at capture time:
 | `log_entry_t` stores raw frame bytes | Raw bytes replaced with pre-formatted strings; formatting moved to `modbus_log_post()` to eliminate large stack locals in `ws_push_task`. |
 | Queue depth 32 | Reduced to 8; throughput at 9600 baud never exceeds queue capacity within a 1 s push cycle. |
 | Log CRC-invalid frames | Only CRC-valid frames addressed to our slave are logged. Bad-CRC frames hit `continue` before `modbus_log_post` — serial still prints them. |
-| `ws_push_task` uses fixed `broadcast_ctx_t` | Added separate `broadcast_dyn_ctx_t` / `ws_broadcast_dyn()` for log frames; status JSON path unchanged. |
+| `ws_push_task` uses fixed `broadcast_ctx_t` | Log frames now also use `ws_broadcast()` with a 320-byte stack-local JSON buffer (`snprintf`).  `broadcast_dyn_ctx_t` / `ws_broadcast_dyn()` were introduced in 0.12.0 and removed in 0.12.2 after a use-after-free stall was identified (see post-Phase-12 section). |
 | GUI table max 200 rows | Reduced to 30 — stream-and-discard model; no persistence needed. |
+
+---
+
+## Post-Phase 12 — Bug Fixes & Web UI Improvements ✅
+
+**Firmware version**: 0.12.3  
+**Flashed**: COM5 — SPIFFS only (no firmware binary change for 0.12.3)  
+**Build metrics**: Flash 83.7 % (1,097,305 / 1,310,720 B) · RAM 15.3 % (50,256 / 327,680 B)
+
+### 0.12.2 — Modbus log stall (firmware + SPIFFS)
+
+**Root cause**: `ws_broadcast_dyn()` set `frame.payload` to a heap buffer,
+called `httpd_ws_send_frame_async()` (non-blocking) for each client, then
+immediately freed the buffer in the same callback.  Because the send is
+deferred to the httpd task, the freed memory was accessed after the callback
+returned — a use-after-free that corrupted the httpd state progressively.
+Under sustained Modbus traffic the log stopped updating while all other
+WebSocket pushes (status JSON) continued working.  Additionally, one
+`httpd_queue_work` + heap allocation per log entry caused fragmentation.
+
+**Fix**: Replaced the `cJSON` + `ws_broadcast_dyn` drain path with a direct
+`snprintf` into a 320-byte stack buffer followed by `ws_broadcast()` — the
+same zero-heap path used for the status JSON.  Log JSON is at most ~200 chars
+(within `STATUS_JSON_MAX` = 768 B).  `broadcast_dyn_ctx_t`, `broadcast_dyn_cb()`,
+and `ws_broadcast_dyn()` were removed entirely.
+
+| File | Change |
+|------|--------|
+| `sensorEmulator/web/web_server.cpp` | Removed `broadcast_dyn_ctx_t` / `broadcast_dyn_cb()` / `ws_broadcast_dyn()`; drain loop replaced with `snprintf` + `ws_broadcast()` |
+
+### 0.12.3 — Slave address conflict validation (SPIFFS only)
+
+Clicking Apply for a sensor slave address when both sensors already share
+the same value now blocks the POST entirely.  An inline error message appears
+directly after the Apply button and is cleared automatically as soon as the
+two address inputs differ.
+
+| File | Change |
+|------|--------|
+| `data/index.html` | `<span id="fg-addr-err">` / `<span id="s200-addr-err">` added after each address Apply button; `oninput="onAddrInput()"` on both address inputs |
+| `data/app.js` | `addrConflict()` and `onAddrInput()` helpers added; `postFgAddr()` / `postS200Addr()` call `addrConflict()` before POST |
+| `data/style.css` | `.addr-err { color: #e74c3c; font-size: .8rem; margin-left: .5rem; }` added |
+
+### Web mock sync (0.12.3)
+
+`webMock/server.py` brought fully up to date with Phase 12 firmware and web UI.
+
+| Area | Change |
+|------|--------|
+| Docstring | Updated from Phase 7 to Phase 12; full endpoint table added |
+| `_state` dict | Added `tz_posix`, `live_lat/lon`, `live_fetch_age/ok`, `replay_state/row`, `replay_csv` |
+| `build_status_json()` | Added `fg.mode`, `fg.addr`, `s200.heat`, `s200.mode`, `s200.addr`, `wifi.ssid`, `live{lat,lon}`, `live_fetch_age`, `live_fetch_ok`, `replay{state,row}` |
+| Log timestamp | `%H:%M:%S` → `%Y-%m-%d %H:%M:%S` (matches firmware `modbus_log.cpp`) |
+| `POST /replay/upload` | Was HTTP 501 stub; now stores CSV bytes in memory, returns `{ok, size}` |
+| `POST /replay/control` | Was HTTP 501 stub; now accepts `{action:"start"\|"stop"}`, returns `{ok, state}` |
+| `POST /config/tz` | New — stores POSIX TZ string, returns `{ok, tz}` |
+| `POST /config/location` | New — clamps lat ±90 / lon ±180, returns `{ok, lat, lon}` |
+
+### Verification
+
+| Scenario | Result |
+|----------|--------|
+| Log updates indefinitely with no stall | ✅ Confirmed — use-after-free removed |
+| Apply FG6485A addr = current S200 addr → POST blocked, error shown next to button | ✅ Confirmed |
+| Error message clears when addresses differ | ✅ Confirmed |
+| Web mock `build_status_json()` includes all Phase 12 fields | ✅ Confirmed (syntax verified) |
+| Web mock log timestamp format `YYYY-MM-DD HH:MM:SS` matches firmware | ✅ Confirmed |
+| Web mock `/replay/upload` returns `{ok, size}` | ✅ Confirmed |
+| Web mock `/replay/control` `start`/`stop` returns `{ok, state}` | ✅ Confirmed |
+| Web mock `/config/tz` and `/config/location` respond correctly | ✅ Confirmed |
 

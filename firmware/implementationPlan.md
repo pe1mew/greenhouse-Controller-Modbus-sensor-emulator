@@ -405,14 +405,14 @@ to the web UI in real time.
 - [x] Define `log_entry_t` with pre-formatted string fields: `ts[20]`, `dir[3]`, `hex[96]`, `summary[64]`.
   - All formatting (timestamp, hex string, decoded summary) is done inside `modbus_log_post()` at capture time in the slave task, not in the push task.
 - [x] `modbus_slave_task` calls `modbus_log_post(RX, frame, len)` on every received frame (CRC-valid) and `modbus_log_post(TX, response, len)` on every transmitted response.
-- [x] `web_server_task` drains `log_queue` in its WebSocket push loop; copies pre-built strings directly into cJSON and pushes `{type:"log", ts, dir, hex, summary}` via `ws_broadcast_dyn()`.
+- [x] `web_server_task` drains `log_queue` in its WebSocket push loop; formats log JSON directly with `snprintf` into a 320-byte stack buffer and pushes via `ws_broadcast()` — the same zero-heap path as status JSON (no dynamic allocation, no extra `httpd_queue_work` call per entry).
 - [x] HTTP POST `/log/clear` → flushes `log_queue` and sends a `{type:"log_clear"}` WebSocket message.
 - [x] `summary` field: decode FC code and register range into human-readable string, e.g. `"FC03 addr=1 reg=0x0000 n=2"`.
 - [x] Queue depth 8 (sufficient for ≤ 4 frame pairs/s at 9600 baud with 1 s push interval); entries silently dropped when full.
 - [x] `WS_PUSH_STACK` = 4096 B — safe because no large buffers allocated in push task.
 - [x] GUI table capped at 30 rows; entries stream-and-discard (no persistent storage).
 
-**Build**: Flash 83.7% (1,097,537 B / 1,310,720 B) · RAM 15.3% (50,256 B / 327,680 B) · Flashed to COM5 ✅
+**Build**: Flash 83.7% (1,097,305 B / 1,310,720 B) · RAM 15.3% (50,256 B / 327,680 B) · Flashed to COM5 ✅
 
 ### Verification
 - [x] Connect test client; execute several FC03 reads → web UI log table populates with matching entries.

@@ -1,12 +1,25 @@
 """
-server.py — Web Mock for the Modbus Sensor Emulator (Phase 7)
+server.py — Web Mock for the Modbus Sensor Emulator (Phase 12)
 
 Emulates the HTTP + WebSocket interface of firmware/sensorEmulator/web/web_server.cpp
 on a desktop PC. Serves firmware/data/ assets directly and simulates all endpoints
 with the same request/response contract as the Atom Lite firmware.
 
+Endpoints:
+    GET  /                   — serves index.html from firmware/data/
+    GET  /ws                 — WebSocket; pushes status JSON (1 Hz) + fake log entries
+    POST /config/sensor      — addr/mode/manual values for fg6485a or s200
+    POST /config/wifi        — SSID/password; simulates 3 s connect
+    POST /config/time        — set clock offset (ISO-8601 datetime)
+    POST /config/tz          — POSIX TZ string (e.g. "CET-1CEST,M3.5.0,M10.5.0/3")
+    POST /config/ntp         — NTP server; simulates 2 s sync
+    POST /config/location    — lat/lon for Live-mode weather fetch
+    POST /replay/upload      — CSV body; stores in memory
+    POST /replay/control     — {"action":"start"|"stop"}
+    POST /log/clear          — broadcasts {"type":"log_clear"} WS message
+
 Usage:
-    cd webMoc
+    cd webMock
     pip install -r requirements.txt
     python server.py
     # Open http://127.0.0.1:5000
@@ -75,6 +88,16 @@ _state = {
     'time_offset_s': 0,        # added to time.time() to simulate settimeofday()
     'ntp_synced':    False,
     'ntp_server':    'pool.ntp.org',
+    'tz_posix':      'UTC0',
+    # Live-fetch location
+    'live_lat':      52.37,
+    'live_lon':       4.90,
+    'live_fetch_age': 0,
+    'live_fetch_ok':  True,
+    # Replay
+    'replay_state':  'idle',   # idle | running | done | error
+    'replay_row':    0,
+    'replay_csv':    None,     # raw CSV bytes stored in memory
 }
 _state_lock = threading.Lock()
 
@@ -129,18 +152,34 @@ def build_status_json() -> str:
         'fg': {
             'temp': s['fg_temp_raw'] / 10.0,
             'hum':  s['fg_hum_raw']  / 10.0,
+            'mode': s['fg_mode'],
+            'addr': s['fg_addr'],
         },
         's200': {
-            'spd': s['s200_spd_raw']  / 1000.0,
-            'dir': s['s200_dir_raw']  / 1000.0,
+            'spd':  s['s200_spd_raw']  / 1000.0,
+            'dir':  s['s200_dir_raw']  / 1000.0,
+            'heat': s['s200_heat_raw'] / 1000.0,
+            'mode': s['s200_mode'],
+            'addr': s['s200_addr'],
         },
         'wifi': {
             'mode': s['wifi_mode'],
             'ip':   s['wifi_ip'],
             'rssi': s['wifi_rssi'],
+            'ssid': s['wifi_ssid'],
         },
-        'time':       time_str,
-        'ntp_synced': s['ntp_synced'],
+        'time':           time_str,
+        'ntp_synced':     s['ntp_synced'],
+        'live': {
+            'lat': s['live_lat'],
+            'lon': s['live_lon'],
+        },
+        'live_fetch_age': s['live_fetch_age'],
+        'live_fetch_ok':  s['live_fetch_ok'],
+        'replay': {
+            'state': s['replay_state'],
+            'row':   s['replay_row'],
+        },
     })
 
 
@@ -155,7 +194,7 @@ def _push_thread() -> None:
             frame_hex, direction, summary = _FAKE_FRAMES[(_log_tick // 5) % len(_FAKE_FRAMES)]
             ws_broadcast(json.dumps({
                 'type':    'log',
-                'ts':      datetime.now(tz=timezone.utc).strftime('%H:%M:%S'),
+                'ts':      datetime.now(tz=timezone.utc).strftime('%Y-%m-%d %H:%M:%S'),
                 'dir':     direction,
                 'hex':     frame_hex,
                 'summary': summary,
@@ -361,14 +400,67 @@ def config_ntp():
 
 
 # ---------------------------------------------------------------------------
-# POST /replay/upload  — Phase 11 stub
-# POST /replay/control — Phase 11 stub
+# POST /replay/upload
+# POST /replay/control
 # ---------------------------------------------------------------------------
 
-@app.route('/replay/upload',  methods=['POST'])
+@app.route('/replay/upload', methods=['POST'])
+def replay_upload():
+    data = request.get_data()
+    if not data:
+        return jsonify({'error': 'Empty body'}), 400
+    with _state_lock:
+        _state['replay_csv']   = data
+        _state['replay_state'] = 'idle'
+        _state['replay_row']   = 0
+    return jsonify({'ok': True, 'size': len(data)})
+
+
 @app.route('/replay/control', methods=['POST'])
-def replay_stub():
-    return jsonify({'error': 'not implemented'}), 501
+def replay_control():
+    body   = request.get_json(silent=True) or {}
+    action = body.get('action', '')
+    with _state_lock:
+        if action == 'start' and _state['replay_csv']:
+            _state['replay_state'] = 'running'
+            _state['replay_row']   = 0
+        elif action == 'stop':
+            _state['replay_state'] = 'idle'
+        state = _state['replay_state']
+    return jsonify({'ok': True, 'state': state})
+
+
+# ---------------------------------------------------------------------------
+# POST /config/tz
+# Mirrors handle_post_tz(); stores POSIX TZ string.
+# ---------------------------------------------------------------------------
+
+@app.route('/config/tz', methods=['POST'])
+def config_tz():
+    body    = request.get_json(silent=True) or {}
+    tz_str  = body.get('tz', '')
+    applied = tz_str if tz_str else 'UTC0'
+    with _state_lock:
+        _state['tz_posix'] = applied
+    return jsonify({'ok': True, 'tz': applied})
+
+
+# ---------------------------------------------------------------------------
+# POST /config/location
+# Mirrors handle_post_location(); stores lat/lon for Live-mode fetch.
+# ---------------------------------------------------------------------------
+
+@app.route('/config/location', methods=['POST'])
+def config_location():
+    body = request.get_json(silent=True) or {}
+    if 'lat' not in body or 'lon' not in body:
+        return jsonify({'error': 'Missing lat/lon'}), 400
+    lat = max(-90.0,  min(90.0,  float(body['lat'])))
+    lon = max(-180.0, min(180.0, float(body['lon'])))
+    with _state_lock:
+        _state['live_lat'] = lat
+        _state['live_lon'] = lon
+    return jsonify({'ok': True, 'lat': lat, 'lon': lon})
 
 
 # ---------------------------------------------------------------------------

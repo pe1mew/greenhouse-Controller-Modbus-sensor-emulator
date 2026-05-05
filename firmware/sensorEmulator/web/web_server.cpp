@@ -252,70 +252,6 @@ static void ws_broadcast(const char *json, size_t len)
 /**
  * @brief Context for a dynamic-length WS broadcast.
  *
- * Unlike broadcast_ctx_t which embeds a fixed-size payload, this structure
- * holds a heap-allocated string so that log JSON frames of arbitrary size
- * can be dispatched without a fixed upper bound.
- */
-struct broadcast_dyn_ctx_t {
-    char   *json; /**< @brief Heap-allocated JSON string (freed by callback). */
-    size_t  len;  /**< @brief Length of @c json. */
-};
-
-/**
- * @brief Broadcast callback for dynamic-length payloads.
- *
- * Invoked on the httpd task via httpd_queue_work().  Sends the JSON to all
- * active WebSocket clients, then frees the payload and the context.
- *
- * @param arg  Heap-allocated @ref broadcast_dyn_ctx_t.
- */
-static void broadcast_dyn_cb(void *arg)
-{
-    auto *ctx = static_cast<broadcast_dyn_ctx_t *>(arg);
-
-    size_t n = MAX_WS_CLIENTS;
-    int    fds[MAX_WS_CLIENTS];
-
-    if (httpd_get_client_list(s_server, &n, fds) == ESP_OK) {
-        httpd_ws_frame_t frame;
-        memset(&frame, 0, sizeof(frame));
-        frame.type    = HTTPD_WS_TYPE_TEXT;
-        frame.payload = reinterpret_cast<uint8_t *>(ctx->json);
-        frame.len     = ctx->len;
-        frame.final   = true;
-
-        for (size_t i = 0; i < n; i++) {
-            if (httpd_ws_get_fd_info(s_server, fds[i]) ==
-                    HTTPD_WS_CLIENT_WEBSOCKET) {
-                httpd_ws_send_frame_async(s_server, fds[i], &frame);
-            }
-        }
-    }
-    free(ctx->json);
-    free(ctx);
-}
-
-/**
- * @brief Schedule a heap-allocated JSON string for WebSocket broadcast.
- *
- * Takes ownership of @p json (calls free() on it in all paths).
- * Safe to call from any FreeRTOS task.
- *
- * @param json  Null-terminated JSON string (heap-allocated via cJSON_PrintUnformatted).
- */
-static void ws_broadcast_dyn(char *json)
-{
-    if (!s_server || !json) { free(json); return; }
-    auto *ctx = static_cast<broadcast_dyn_ctx_t *>(malloc(sizeof(broadcast_dyn_ctx_t)));
-    if (!ctx) { free(json); return; }
-    ctx->json = json;
-    ctx->len  = strlen(json);
-    if (httpd_queue_work(s_server, broadcast_dyn_cb, ctx) != ESP_OK) {
-        free(json);
-        free(ctx);
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Status JSON builder
 // ---------------------------------------------------------------------------
@@ -1075,19 +1011,15 @@ static void ws_push_task(void * /*arg*/)
 
         // Drain all pending Modbus log entries and forward each as a WS frame.
         // Entries are pre-formatted (ts, dir, hex, summary strings) by
-        // modbus_log_post() at capture time, so no large intermediate buffers
-        // are needed here.
+        // modbus_log_post() at capture time.  Build the JSON on the stack and
+        // reuse the existing ws_broadcast() path — no heap allocation needed.
         log_entry_t entry;
+        char log_json[320];
         while (modbus_log_receive(&entry, 0)) {
-            cJSON *msg = cJSON_CreateObject();
-            cJSON_AddStringToObject(msg, "type",    "log");
-            cJSON_AddStringToObject(msg, "ts",      entry.ts);
-            cJSON_AddStringToObject(msg, "dir",     entry.dir);
-            cJSON_AddStringToObject(msg, "hex",     entry.hex);
-            cJSON_AddStringToObject(msg, "summary", entry.summary);
-            char *msg_str = cJSON_PrintUnformatted(msg);
-            cJSON_Delete(msg);
-            ws_broadcast_dyn(msg_str);   // takes ownership; handles nullptr gracefully
+            snprintf(log_json, sizeof(log_json),
+                     "{\"type\":\"log\",\"ts\":\"%s\",\"dir\":\"%s\",\"hex\":\"%s\",\"summary\":\"%s\"}",
+                     entry.ts, entry.dir, entry.hex, entry.summary);
+            ws_broadcast(log_json, strlen(log_json));
         }
     }
 }
