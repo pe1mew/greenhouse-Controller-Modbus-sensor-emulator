@@ -1532,3 +1532,200 @@ with `<h2>Replay CSV</h2>` consistent with the other section headings.
 | `ws_push_task` stack 4 096 B | Raised to 6 144 B due to `push_replay_window()` stack usage; `char json[1024]` made `static` to keep BSS cost predictable |
 | Phase 13 was originally Integration Testing | Repurposed as Replay Mode Redesign; integration testing deferred |
 
+---
+
+## Post-Phase-13 Bug Fixes ✅
+
+### 0.13.3 — Replay event window never rendered (JSON truncation)
+
+**Firmware version**: 0.13.3  
+**Flashed**: COM5 — firmware binary  
+**Build metrics**: Flash 83.9 % (1,099,933 / 1,310,720 B) · RAM 15.7 % (51,456 / 327,680 B)
+
+#### Root cause
+
+`format_win_entry()` generates one JSON object per row in the format:
+
+```
+{"ts":"HH:MM:SS","rh":XX.X,"temp":XX.X,"spd":X.X,"dir":XXX.X,"heat":XX.X}
+```
+
+Worst-case output is **111 bytes** (all float fields present, large values).
+`push_replay_window()` allocated entry buffers of only **96 bytes**.
+`snprintf` silently truncated the output; the resulting JSON object was
+syntactically invalid (truncated before the closing `}`). The three truncated
+objects were concatenated into `win_json` (320 bytes), which was also
+structurally invalid JSON.
+
+`JSON.parse()` in the browser threw on the invalid string. The `catch (_) {}`
+block in `ws.onmessage` silently discarded the exception, so
+`handleReplayWindow()` was never called and the event window table remained
+permanently empty across all replay sessions.
+
+#### Fix
+
+| Location | Change |
+|----------|--------|
+| `web/web_server.cpp` `push_replay_window()` | Entry buffers: 96 → **128** bytes |
+| `web/web_server.cpp` `push_replay_window()` | `win_json` buffer: 320 → **448** bytes (framing ≈ 50 + 3×128 + margin) |
+
+Stack delta in `push_replay_window`: +224 bytes; `WS_PUSH_STACK` (6,144 B)
+remains adequate.
+
+#### Verification
+
+| Test | Result |
+|------|--------|
+| Replay event window table populates on replay start | ✅ Confirmed |
+| `curr` row highlighted in blue | ✅ Confirmed |
+| Window updates on Prev / Next navigation | ✅ Confirmed |
+| No JSON parse errors observed (browser DevTools) | ✅ Confirmed |
+
+---
+
+### 0.13.4 — Modbus log timestamp empty when NTP not yet synced
+
+**Firmware version**: 0.13.4  
+**Flashed**: COM5 — firmware binary  
+**Build metrics**: Flash 83.9 % (1,100,033 / 1,310,720 B) · RAM 15.7 % (51,456 / 327,680 B)
+
+#### Root cause
+
+`modbus_log_post()` in `modbus_log.cpp` only populated `entry.ts` when the
+system clock was beyond the epoch guard (`time(NULL) > 1577836800LL`,
+i.e. past 2020-01-01).  When the clock had not yet been set — which happens
+every time the device reboots, including the hard reset triggered by a
+SPIFFS upload — `entry.ts` was left as an empty string.  `appendLog()` in
+`app.js` rendered `entry.ts` directly into the Time cell, so the entire
+**Time** column was blank until NTP synced (typically 5–30 s after WiFi
+connects).
+
+The symptom appeared to be a regression introduced by the footer SPIFFS
+upload (which caused a reboot), but the underlying code had always behaved
+this way; the footer was simply the trigger that exposed it.
+
+#### Fix
+
+```cpp
+// modbus/modbus_log.cpp  —  modbus_log_post()
+time_t now = time(nullptr);
+if (now > 1577836800LL) {   // > 2020-01-01 — NTP-synced wall clock
+    struct tm ti;
+    localtime_r(&now, &ti);
+    strftime(entry.ts, sizeof(entry.ts), "%Y-%m-%d %H:%M:%S", &ti);
+} else {
+    // Clock not yet set — fall back to device uptime in +HH:MM:SS format.
+    uint32_t up_s = (uint32_t)(millis() / 1000UL);
+    snprintf(entry.ts, sizeof(entry.ts), "+%02u:%02u:%02u",
+             up_s / 3600u, (up_s % 3600u) / 60u, up_s % 60u);
+}
+```
+
+The leading `+` distinguishes uptime from a real wall-clock timestamp.
+Once NTP syncs, subsequent log entries use `YYYY-MM-DD HH:MM:SS` as before.
+
+#### Verification
+
+| Test | Result |
+|------|--------|
+| Immediately after reboot (NTP not yet synced) — Time column shows `+00:00:XX` | ✅ Confirmed |
+| After NTP sync — Time column shows `YYYY-MM-DD HH:MM:SS` | ✅ Confirmed |
+| No regression in Modbus response behaviour | ✅ Confirmed |
+
+---
+
+## Web UI — Footer & Version (0.9.0-beta) ✅
+
+**Date**: 2026-05-05  
+**SPIFFS flash**: COM5 (firmware unchanged — SPIFFS-only upload)
+
+### Changes
+
+A persistent footer was added to `index.html`, and matching styles were
+appended to `style.css`.
+
+```html
+<footer>
+  <span>Greenhouse Controller Modbus Sensor Emulator &nbsp;&bull;&nbsp; v0.9.0-beta</span>
+  <a href="https://github.com/pe1mew/greenhouse-Controller-Modbus-sensor-emulator"
+     target="_blank" rel="noopener noreferrer">GitHub &nearr;</a>
+</footer>
+```
+
+```css
+footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 2rem;
+  padding: .6rem 0;
+  border-top: 1px solid var(--accent);
+  font-size: .75rem;
+  color: var(--muted);
+}
+footer a { color: var(--muted); text-decoration: none; }
+footer a:hover { color: var(--fg); }
+```
+
+| File | Change |
+|------|--------|
+| `data/index.html` | `<footer>` block added before `</body>`, after `<script src="app.js"></script>` |
+| `data/style.css` | Footer CSS appended at end of file |
+
+### Verification
+
+| Test | Result |
+|------|--------|
+| Footer visible at bottom of web UI | ✅ Confirmed |
+| Footer text shows project name and `v0.9.0-beta` | ✅ Confirmed |
+| GitHub link opens repository in new tab | ✅ Confirmed |
+| Footer does not overlap any UI element | ✅ Confirmed |
+
+---
+
+## Release — 0.9.0-beta ✅
+
+**Date**: 2026-05-05  
+**Firmware**: 0.13.4  
+**Hardware**: M5Stack Atom Lite (ESP32-PICO-D4, 240 MHz) + Atomic RS485 Base, COM5, MAC `14:2b:2f:a0:b7:8c`  
+**Build**: Flash 83.9 % (1,100,033 / 1,310,720 B) · RAM 15.7 % (51,456 / 327,680 B)
+
+### Summary
+
+First public beta release. All core emulation, web interface, and replay
+features are complete and verified on hardware. Internal development build
+numbers (0.1.x – 0.13.x) are retained in `changelog.md` for traceability.
+
+### Feature status at release
+
+| Feature | Status |
+|---------|--------|
+| FG6485A Modbus RTU emulation — FC03, T/RH registers | ✅ |
+| SenseCAP S200 Modbus RTU emulation — FC04, wind speed/dir/heat | ✅ |
+| Manual mode — web sliders, NVS persistence | ✅ |
+| Live mode — Open-Meteo weather API, ip-api.com geolocation | ✅ |
+| Replay mode — relative-time CSV playback, 6 transport controls | ✅ |
+| Replay event window — prev/curr/next row, WebSocket push | ✅ |
+| WiFi AP/STA auto-switch, mDNS `sensor-emulator.local` | ✅ |
+| NTP time sync + POSIX timezone + manual time fallback | ✅ |
+| Modbus activity log — live WebSocket stream, resizable columns | ✅ |
+| Per-sensor Modbus slave address — NVS persistence | ✅ |
+| RGB LED status feedback | ✅ |
+| Web UI footer — project name, version, GitHub link | ✅ |
+
+### Known limitations at release
+
+- Replay mode requires WiFi for CSV upload; no SD card / USB mass-storage path.
+- Replay does not loop; press Start again to replay from the beginning.
+- SPIFFS partition shared with web assets; practical CSV capacity ≈ 500 KB.
+- Modbus log timestamps are shown as device uptime (`+HH:MM:SS`) until NTP syncs after each reboot.
+
+### Documents updated for release
+
+| Document | Change |
+|----------|--------|
+| `changelog.md` | `[0.9.0-beta]` entry added at top; internal entries `[0.13.0]`–`[0.13.4]` present below |
+| `firmware/implementationPlan.md` | Phase 13 row marked ✅ Complete; Phase 13 section replaced with Replay Mode Redesign |
+| `firmware/implementationRealisation.md` | Phase 13 section added; post-Phase-13 fix sections added; release section added (this document) |
+| `manual/manualReplay.md` | New — comprehensive 13-section manual for the replay feature |
+
