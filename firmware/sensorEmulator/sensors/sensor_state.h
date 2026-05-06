@@ -53,7 +53,9 @@ typedef enum {
     /** Values fetched periodically from the Open-Meteo weather API. */
     SENSOR_MODE_LIVE   = 1,
     /** Values replayed from a timestamped CSV file on LittleFS. */
-    SENSOR_MODE_REPLAY = 2
+    SENSOR_MODE_REPLAY = 2,
+    /** Values injected by an external source via POST /api/data. */
+    SENSOR_MODE_REST   = 3
 } sensor_mode_t;
 
 // ---------------------------------------------------------------------------

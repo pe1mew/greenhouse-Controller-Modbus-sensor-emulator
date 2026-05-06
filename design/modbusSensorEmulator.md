@@ -55,6 +55,28 @@ Each sensor has its own independent mode selection.
 - The active row is highlighted in the web interface.
 - The file is stored in SPIFFS/LittleFS; the filename is saved in NVS.
 
+### 2.4 REST
+- An external HTTP client pushes weather values to the device by sending a
+  `POST /api/data` request with a JSON body.
+- Any subset of the five named fields may appear in the payload; absent fields
+  are not modified.
+- **Field names**: `T` (FG6485A temperature, °C), `RH` (FG6485A humidity, %RH),
+  `Direction` (S200 wind direction, °), `Speed` (S200 wind speed, m/s),
+  `Heating` (S200 heating temperature, °C).
+- **Range checking**: each field is validated against the physical sensor range
+  (§11.1) **before** being written to `sensor_state`.  Out-of-range values are
+  **rejected** (not clamped) and the register is not modified.
+- **Mode guard**: FG6485A fields are only applied when the FG6485A mode is REST;
+  S200 fields are only applied when the S200 mode is REST.  The two sensors are
+  independent — one can be in REST while the other is in Manual, Live, or Replay.
+- The response JSON reports the outcome for every field that was present in the
+  request: `"accepted"` (with the stored value), `"rejected"` (with `min`/`max`
+  and reason `"out_of_range"`), or `"skipped"` (reason `"not_rest_mode"`).
+- Accepted values are held in RAM until the next POST or a mode change.  They
+  are not persisted to NVS; after a reboot the Modbus bus serves the last
+  Manual-mode NVS values until the first REST push arrives.
+- The endpoint is available at all times (AP and STA mode) on port 80.
+
 ---
 
 ## 3. Hardware

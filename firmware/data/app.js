@@ -33,7 +33,7 @@ function wsConnect() {
 // ── Status update ────────────────────────────────────────────────────────
 let wsInitialized = false;
 
-const MODE_NAMES = ['Manual', 'Live', 'Replay'];
+const MODE_NAMES = ['Manual', 'Live', 'Replay', 'REST'];
 
 /** 87 s = LIVE_FETCH_INTERVAL_S on the firmware side. */
 const LIVE_FETCH_INTERVAL_S = 87;

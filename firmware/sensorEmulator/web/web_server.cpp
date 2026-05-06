@@ -468,7 +468,7 @@ static esp_err_t handle_post_sensor(httpd_req_t *req)
         }
 
         if (cJSON_IsNumber(j_mode)) {
-            sensor_mode_t mode = (sensor_mode_t)clamp_int(j_mode->valueint, 0, 2);
+            sensor_mode_t mode = (sensor_mode_t)clamp_int(j_mode->valueint, 0, 3);
             nvs_cfg_set_u8(NVS_KEY_FG_MODE, (uint8_t)mode);
             xSemaphoreTake(g_sensor_state.mutex, portMAX_DELAY);
             g_sensor_state.fg_mode = mode;
@@ -519,7 +519,7 @@ static esp_err_t handle_post_sensor(httpd_req_t *req)
         }
 
         if (cJSON_IsNumber(j_mode)) {
-            sensor_mode_t mode = (sensor_mode_t)clamp_int(j_mode->valueint, 0, 2);
+            sensor_mode_t mode = (sensor_mode_t)clamp_int(j_mode->valueint, 0, 3);
             nvs_cfg_set_u8(NVS_KEY_S200_MODE, (uint8_t)mode);
             xSemaphoreTake(g_sensor_state.mutex, portMAX_DELAY);
             g_sensor_state.s200_mode = mode;
@@ -1068,6 +1068,205 @@ static void push_replay_window(void)
 }
 
 // ---------------------------------------------------------------------------
+// POST /api/data  — REST data-push endpoint
+// ---------------------------------------------------------------------------
+
+/**
+ * @brief Add a per-field result object to @p resp.
+ *
+ * @param resp    Parent cJSON object.
+ * @param field   Field name (key in the response JSON).
+ * @param status  "accepted" | "rejected" | "skipped".
+ * @param value   Engineering-unit value echoed on "accepted" (ignored otherwise).
+ * @param reason  Reason string echoed on "rejected" / "skipped".
+ * @param min     Physical minimum echoed on "rejected" (ignored otherwise).
+ * @param max     Physical maximum echoed on "rejected" (ignored otherwise).
+ */
+static void api_field_result(cJSON *resp, const char *field,
+                             const char *status, double value,
+                             const char *reason, double min, double max)
+{
+    cJSON *obj = cJSON_CreateObject();
+    cJSON_AddStringToObject(obj, "status", status);
+    if (strcmp(status, "accepted") == 0) {
+        cJSON_AddNumberToObject(obj, "value", value);
+    } else if (strcmp(status, "rejected") == 0) {
+        cJSON_AddStringToObject(obj, "reason", reason);
+        cJSON_AddNumberToObject(obj, "min", min);
+        cJSON_AddNumberToObject(obj, "max", max);
+    } else {
+        cJSON_AddStringToObject(obj, "reason", reason);
+    }
+    cJSON_AddItemToObject(resp, field, obj);
+}
+
+/**
+ * @brief Handle POST /api/data — accept weather values from an external REST source.
+ *
+ * Any subset of the following name/value pairs may appear in the JSON body.
+ * A field is applied only when the corresponding sensor is in
+ * @c SENSOR_MODE_REST and the value is within the physical range; otherwise
+ * it is reported as rejected or skipped.
+ *
+ * Accepted fields:
+ * @code
+ * {
+ *   "T":         float,   // FG6485A temperature     (°C,  -40 … 120)
+ *   "RH":        float,   // FG6485A relative humidity (%RH, 0 … 99.9)
+ *   "Direction": float,   // S200 wind direction      (°,   0 … 360)
+ *   "Speed":     float,   // S200 wind speed          (m/s, 0 … 60)
+ *   "Heating":   float    // S200 heating temperature (°C, -40 … 85)
+ * }
+ * @endcode
+ *
+ * Response JSON: each received field is echoed with a per-field object:
+ * @code
+ * {
+ *   "T":    { "status": "accepted", "value": 25.0 },
+ *   "RH":   { "status": "rejected", "reason": "out_of_range",  "min": 0, "max": 99.9 },
+ *   "Speed":{ "status": "skipped",  "reason": "not_rest_mode" }
+ * }
+ * @endcode
+ *
+ * @param req  Incoming HTTP POST request.
+ * @return ESP_OK; HTTP 400 is sent on parse error.
+ */
+static esp_err_t handle_post_api_data(httpd_req_t *req)
+{
+    char body[HTTP_BODY_MAX];
+    if (read_body(req, body, sizeof(body)) != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Read error");
+        return ESP_OK;
+    }
+    cJSON *root = cJSON_Parse(body);
+    if (!root) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "JSON parse error");
+        return ESP_OK;
+    }
+
+    // Snapshot current modes (single lock, short critical section).
+    xSemaphoreTake(g_sensor_state.mutex, portMAX_DELAY);
+    sensor_mode_t fg_mode   = g_sensor_state.fg_mode;
+    sensor_mode_t s200_mode = g_sensor_state.s200_mode;
+    xSemaphoreGive(g_sensor_state.mutex);
+
+    cJSON *resp = cJSON_CreateObject();
+
+    // ---- T : FG6485A temperature (°C) ------------------------------------
+    cJSON *j_T = cJSON_GetObjectItem(root, "T");
+    if (j_T && cJSON_IsNumber(j_T)) {
+        if (fg_mode != SENSOR_MODE_REST) {
+            api_field_result(resp, "T", "skipped", 0, "not_rest_mode", 0, 0);
+        } else {
+            int16_t raw = (int16_t)roundf((float)j_T->valuedouble * 10.0f);
+            if (raw < FG6485A_TEMP_RAW_MIN || raw > FG6485A_TEMP_RAW_MAX) {
+                api_field_result(resp, "T", "rejected", 0, "out_of_range",
+                                 FG6485A_TEMP_RAW_MIN / 10.0,
+                                 FG6485A_TEMP_RAW_MAX / 10.0);
+            } else {
+                xSemaphoreTake(g_sensor_state.mutex, portMAX_DELAY);
+                g_sensor_state.fg_temperature = raw;
+                xSemaphoreGive(g_sensor_state.mutex);
+                api_field_result(resp, "T", "accepted", raw / 10.0, nullptr, 0, 0);
+            }
+        }
+    }
+
+    // ---- RH : FG6485A relative humidity (%RH) ----------------------------
+    cJSON *j_RH = cJSON_GetObjectItem(root, "RH");
+    if (j_RH && cJSON_IsNumber(j_RH)) {
+        if (fg_mode != SENSOR_MODE_REST) {
+            api_field_result(resp, "RH", "skipped", 0, "not_rest_mode", 0, 0);
+        } else {
+            int32_t raw32 = (int32_t)roundf((float)j_RH->valuedouble * 10.0f);
+            if (raw32 < (int32_t)FG6485A_HUM_RAW_MIN || raw32 > (int32_t)FG6485A_HUM_RAW_MAX) {
+                api_field_result(resp, "RH", "rejected", 0, "out_of_range",
+                                 FG6485A_HUM_RAW_MIN / 10.0,
+                                 FG6485A_HUM_RAW_MAX / 10.0);
+            } else {
+                uint16_t cr = (uint16_t)raw32;
+                xSemaphoreTake(g_sensor_state.mutex, portMAX_DELAY);
+                g_sensor_state.fg_humidity = cr;
+                xSemaphoreGive(g_sensor_state.mutex);
+                api_field_result(resp, "RH", "accepted", cr / 10.0, nullptr, 0, 0);
+            }
+        }
+    }
+
+    // ---- Direction : S200 wind direction (°) -----------------------------
+    cJSON *j_dir = cJSON_GetObjectItem(root, "Direction");
+    if (j_dir && cJSON_IsNumber(j_dir)) {
+        if (s200_mode != SENSOR_MODE_REST) {
+            api_field_result(resp, "Direction", "skipped", 0, "not_rest_mode", 0, 0);
+        } else {
+            int32_t raw = (int32_t)roundf((float)j_dir->valuedouble * 1000.0f);
+            if (raw < S200_DIR_RAW_MIN || raw > S200_DIR_RAW_MAX) {
+                api_field_result(resp, "Direction", "rejected", 0, "out_of_range",
+                                 S200_DIR_RAW_MIN / 1000.0,
+                                 S200_DIR_RAW_MAX / 1000.0);
+            } else {
+                xSemaphoreTake(g_sensor_state.mutex, portMAX_DELAY);
+                g_sensor_state.s200_dir_min = g_sensor_state.s200_dir_max =
+                    g_sensor_state.s200_dir_avg = raw;
+                xSemaphoreGive(g_sensor_state.mutex);
+                api_field_result(resp, "Direction", "accepted", raw / 1000.0, nullptr, 0, 0);
+            }
+        }
+    }
+
+    // ---- Speed : S200 wind speed (m/s) -----------------------------------
+    cJSON *j_spd = cJSON_GetObjectItem(root, "Speed");
+    if (j_spd && cJSON_IsNumber(j_spd)) {
+        if (s200_mode != SENSOR_MODE_REST) {
+            api_field_result(resp, "Speed", "skipped", 0, "not_rest_mode", 0, 0);
+        } else {
+            int32_t raw = (int32_t)roundf((float)j_spd->valuedouble * 1000.0f);
+            if (raw < S200_SPD_RAW_MIN || raw > S200_SPD_RAW_MAX) {
+                api_field_result(resp, "Speed", "rejected", 0, "out_of_range",
+                                 S200_SPD_RAW_MIN / 1000.0,
+                                 S200_SPD_RAW_MAX / 1000.0);
+            } else {
+                xSemaphoreTake(g_sensor_state.mutex, portMAX_DELAY);
+                g_sensor_state.s200_spd_min = g_sensor_state.s200_spd_max =
+                    g_sensor_state.s200_spd_avg = raw;
+                xSemaphoreGive(g_sensor_state.mutex);
+                api_field_result(resp, "Speed", "accepted", raw / 1000.0, nullptr, 0, 0);
+            }
+        }
+    }
+
+    // ---- Heating : S200 heating temperature (°C) -------------------------
+    cJSON *j_heat = cJSON_GetObjectItem(root, "Heating");
+    if (j_heat && cJSON_IsNumber(j_heat)) {
+        if (s200_mode != SENSOR_MODE_REST) {
+            api_field_result(resp, "Heating", "skipped", 0, "not_rest_mode", 0, 0);
+        } else {
+            int32_t raw = (int32_t)roundf((float)j_heat->valuedouble * 1000.0f);
+            if (raw < S200_HEAT_RAW_MIN || raw > S200_HEAT_RAW_MAX) {
+                api_field_result(resp, "Heating", "rejected", 0, "out_of_range",
+                                 S200_HEAT_RAW_MIN / 1000.0,
+                                 S200_HEAT_RAW_MAX / 1000.0);
+            } else {
+                xSemaphoreTake(g_sensor_state.mutex, portMAX_DELAY);
+                g_sensor_state.s200_heat_high = g_sensor_state.s200_heat_low = raw;
+                xSemaphoreGive(g_sensor_state.mutex);
+                api_field_result(resp, "Heating", "accepted", raw / 1000.0, nullptr, 0, 0);
+            }
+        }
+    }
+
+    cJSON_Delete(root);
+    Serial.println("[web/api] POST /api/data processed");
+
+    char *resp_str = cJSON_PrintUnformatted(resp);
+    cJSON_Delete(resp);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, resp_str ? resp_str : "{}");
+    free(resp_str);
+    return ESP_OK;
+}
+
+// ---------------------------------------------------------------------------
 // WebSocket push task
 // ---------------------------------------------------------------------------
 
@@ -1206,6 +1405,10 @@ void web_server_init(void)
         .uri = "/log/clear", .method = HTTP_POST,
         .handler = handle_post_log_clear
     };
+    const httpd_uri_t u_api_data = {
+        .uri = "/api/data", .method = HTTP_POST,
+        .handler = handle_post_api_data
+    };
 
     httpd_register_uri_handler(s_server, &u_root);
     httpd_register_uri_handler(s_server, &u_html);
@@ -1221,6 +1424,7 @@ void web_server_init(void)
     httpd_register_uri_handler(s_server, &u_replay_up);
     httpd_register_uri_handler(s_server, &u_replay_ctrl);
     httpd_register_uri_handler(s_server, &u_log_clear);
+    httpd_register_uri_handler(s_server, &u_api_data);
 
     // Launch the WebSocket push task.
     xTaskCreate(ws_push_task, "ws_push", WS_PUSH_STACK, nullptr, 1, nullptr);

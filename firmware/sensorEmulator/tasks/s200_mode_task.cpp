@@ -83,6 +83,11 @@ void s200_mode_task(void *arg)
             // Phase 11: replay_task will inject values from the CSV file.
             Serial.println("[s200_mode] REPLAY — Phase 11 not yet implemented");
             break;
+
+        case SENSOR_MODE_REST:
+            // REST mode: values are injected by POST /api/data in web_server;
+            // nothing to do here.
+            break;
         }
     }
 }
